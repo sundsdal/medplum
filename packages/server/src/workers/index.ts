@@ -3,7 +3,8 @@
 import type { BackgroundJobContext, WithId } from '@medplum/core';
 import type { Resource } from '@medplum/fhirtypes';
 import { getEnabledWorkerNames } from '../config/background-jobs';
-import { WORKER_NAMES, type WorkerName } from '../config/types';
+import type { WorkerName } from '../config/types';
+import { WORKER_NAMES } from '../config/types';
 import type { ServerConfig } from '../config/utils';
 import { getLogger, globalLogger } from '../logger';
 import { closeQueueBackend, initQueueBackend } from './backend';

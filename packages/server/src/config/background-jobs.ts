@@ -1,10 +1,12 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
-import { type MedplumServerConfig, WORKER_NAMES, type WorkerName } from './types';
+import type { MedplumServerConfig, WorkerName } from './types';
+import { WORKER_NAMES } from './types';
 
 export const DEFAULT_POSTGRES_QUEUE_CONNECTIONS = 32;
 
-/** Returns the workers enabled on this server instance.
+/**
+ * Returns the workers enabled on this server instance.
  * @param config - Server configuration.
  * @returns Enabled worker names.
  */
@@ -15,7 +17,8 @@ export function getEnabledWorkerNames(config: MedplumServerConfig): WorkerName[]
     : WORKER_NAMES.filter((name) => enabled.includes(name));
 }
 
-/** Validates the minimum pool size for listeners, queries, and health checks.
+/**
+ * Validates the minimum pool size for listeners, queries, and health checks.
  * @param maxConnections - Maximum pool connections.
  * @param workerCount - Number of enabled workers.
  */

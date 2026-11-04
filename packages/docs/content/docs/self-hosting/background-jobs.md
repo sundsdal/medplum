@@ -30,6 +30,8 @@ Add `backgroundJobs` to the JSON server configuration. Store the connection stri
 
 `maxConnections` limits the queue pool **per server instance** and defaults to `32`. It must be an integer of at least `2 × enabled workers + 2`: one listener per worker, capacity for worker queries, and a health-check reserve. This minimum is a starting point, not a guarantee of sufficient capacity. Account for total worker concurrency, tune the pool through load testing, and include all instances when sizing PostgreSQL’s connection limit. The queue database can be separate from Medplum’s FHIR database. Use a direct connection or PgBouncer session pooling: transaction pooling does not preserve the sessions needed for notifications. For TLS, configure certificate verification through the PostgreSQL URL, including `sslmode=verify-full` and `sslrootcert` pointing to a trusted CA certificate accessible to the server.
 
+Queue pool connections use the `read committed` transaction isolation level required by the queue backend, overriding any database default or URL startup option for that setting. This does not change the isolation level of the FHIR database pool.
+
 The server runs BullMQ's advisory-lock-protected schema migrations during startup. The configured PostgreSQL role must be allowed to create and update the queue tables and related schema objects. Keep those migration privileges available to the role used at startup.
 
 For environment-based configuration, provide the JSON value as `MEDPLUM_BACKGROUND_JOBS`, for example:

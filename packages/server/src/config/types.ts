@@ -55,8 +55,7 @@ export interface MedplumServerConfig {
   backgroundJobsRedis?: MedplumRedisConfig;
   /** Queue storage. Redis is used when omitted and recommended for production. PostgreSQL is experimental and requires a dedicated connection string. */
   backgroundJobs?:
-    | { backend: 'redis' }
-    | { backend: 'postgres'; postgres: { connectionString: string; maxConnections?: number } };
+    { backend: 'redis' } | { backend: 'postgres'; postgres: { connectionString: string; maxConnections?: number } };
   shards?: Record<string, MedplumShardConfig>;
   emailProvider?: 'none' | 'awsses' | 'smtp';
   smtp?: MedplumSmtpConfig;

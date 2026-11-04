@@ -9,6 +9,7 @@ import { vi } from 'vitest';
 import { inviteUser } from './admin/invite';
 import { initApp, JSON_TYPE, shutdownApp } from './app';
 import { getConfig, loadTestConfig } from './config/loader';
+import * as database from './database';
 import { DatabaseMode, getDatabasePool } from './database';
 import { getProjectSystemRepo } from './fhir/repo';
 import { GLOBAL_SHARD_ID } from './fhir/sharding';
@@ -18,7 +19,6 @@ import { getRateLimitRedis } from './redis';
 import type { TestRedisConfig } from './test.setup';
 import { createTestProject, deleteRedisKeys, getSuperAdminAccessToken, initTestAuth } from './test.setup';
 import * as workers from './workers';
-import * as database from './database';
 
 describe('App', () => {
   let stdOutSpy: MockInstance;

@@ -2,15 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 import type {
   BackendFactory,
+  Queue as BullQueue,
+  Worker as BullWorker,
   ConnectionOptions,
   IQueueBackend,
   PostgresConnectionOptions,
-  Queue as BullQueue,
-  Worker as BullWorker,
 } from 'bullmq';
 import { createPostgresBackend, createRedisBackend, isPgPool, runMigrations, withBackend } from 'bullmq';
-import { Pool } from 'pg';
 import type { PoolClient } from 'pg';
+import { Pool } from 'pg';
 import { DEFAULT_POSTGRES_QUEUE_CONNECTIONS, validatePostgresPoolSize } from '../config/background-jobs';
 import type { ServerConfig } from '../config/utils';
 import { globalLogger } from '../logger';
@@ -53,7 +53,10 @@ export async function initQueueBackend(config: ServerConfig, workerCount: number
   }
   // pg-connection-string uses the last occurrence when a parameter is repeated.
   const options = url.searchParams.getAll('options').at(-1);
-  url.searchParams.set('options', `${options ? `${options} ` : ''}-c search_path=bullmq`);
+  url.searchParams.set(
+    'options',
+    `${options ? `${options} ` : ''}-c search_path=bullmq -c default_transaction_isolation=read\\ committed`
+  );
   const newPool = new Pool({ connectionString: url.toString(), max: maxConnections, connectionTimeoutMillis: 5_000 });
   // BullMQ attaches a pool error listener for every queue and worker backend.
   newPool.setMaxListeners(64);
@@ -123,7 +126,10 @@ function releaseHealthClient(expected = healthClient): void {
     return;
   }
   healthClient = undefined;
-  expected.then((client) => client.release(true), () => undefined);
+  expected.then(
+    (client) => client.release(true),
+    () => undefined
+  );
 }
 
 export async function testQueueBackend(config: ServerConfig): Promise<boolean | undefined> {
