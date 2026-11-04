@@ -4,6 +4,12 @@ sidebar_position: 203
 
 # Background job storage
 
+:::caution Experimental
+
+The PostgreSQL background job backend is opt-in for evaluation and testing and has not been validated for production. Redis remains the recommended production backend.
+
+:::
+
 Medplum uses BullMQ for background work. Redis remains the default queue backend. You can opt into PostgreSQL queue storage for self-hosted deployments with the `backgroundJobs` setting. Redis is still required for other server features, including caching, rate limiting, and pub/sub.
 
 ## Configure PostgreSQL
