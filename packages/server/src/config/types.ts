@@ -424,18 +424,21 @@ export interface MedplumExternalAuthConfig {
   readonly identityProvider?: IdentityProvider;
 }
 
-export type WorkerName =
-  | 'dispatch'
-  | 'subscription'
-  | 'download'
-  | 'cron'
-  | 'reindex'
-  | 'batch'
-  | 'bulk-export'
-  | 'post-deploy-migration'
-  | 'set-accounts'
-  | 'lambda-cleaner'
-  | 'dicom';
+export const WORKER_NAMES = [
+  'dispatch',
+  'subscription',
+  'download',
+  'cron',
+  'reindex',
+  'batch',
+  'bulk-export',
+  'post-deploy-migration',
+  'set-accounts',
+  'lambda-cleaner',
+  'dicom',
+] as const;
+
+export type WorkerName = (typeof WORKER_NAMES)[number];
 
 export interface MedplumWorkersConfig {
   /**
