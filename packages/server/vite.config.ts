@@ -101,6 +101,7 @@ export default defineConfig({
       include: ['src/**/*.ts'],
       exclude: [
         'src/**/*.test.ts',
+        'src/workers/backend.postgres.integration.ts',
         'src/__mocks__/**',
         'src/migrations/migrate-main.ts',
         'src/migrations/schema/**',

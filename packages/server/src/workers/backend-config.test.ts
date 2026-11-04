@@ -4,7 +4,10 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { vi } from 'vitest';
+import { getEnabledWorkerNames, validatePostgresPoolSize } from '../config/background-jobs';
 import { loadConfig } from '../config/loader';
+import type { MedplumServerConfig } from '../config/types';
+import { setValue } from '../config/utils';
 
 describe('background job configuration', () => {
   const dir = mkdtempSync(join(tmpdir(), 'medplum-jobs-config-'));
@@ -25,9 +28,24 @@ describe('background job configuration', () => {
   test('accepts PostgreSQL connection settings', async () => {
     const backgroundJobs = {
       backend: 'postgres',
-      postgres: { connectionString: 'postgres://localhost/jobs', maxConnections: 4 },
+      postgres: { connectionString: 'postgres://localhost/jobs', maxConnections: 32 },
     };
     expect((await load(backgroundJobs)).backgroundJobs).toEqual(backgroundJobs);
+  });
+
+  test('sizes pools for enabled workers', () => {
+    const config = { workers: { enabled: ['cron', 'batch'] } } as unknown as MedplumServerConfig;
+    expect(getEnabledWorkerNames(config)).toEqual(['cron', 'batch']);
+    expect(() => validatePostgresPoolSize(5, 2)).toThrow('at least 6');
+    expect(() => validatePostgresPoolSize(6, 2)).not.toThrow();
+    expect(getEnabledWorkerNames({ workers: { enabled: [] } } as unknown as MedplumServerConfig)).toEqual([]);
+    expect(getEnabledWorkerNames({ workers: { enabled: ['*'] } } as unknown as MedplumServerConfig)).toHaveLength(11);
+  });
+
+  test('parses dotted queue pool settings without truncating fractions', () => {
+    const config: Record<string, unknown> = {};
+    setValue(config, 'backgroundJobs.postgres.maxConnections', '24.5');
+    expect(config).toEqual({ backgroundJobs: { postgres: { maxConnections: 24.5 } } });
   });
 
   test('loads PostgreSQL settings from the environment', async () => {

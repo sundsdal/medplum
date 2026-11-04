@@ -3,7 +3,7 @@
 import type { WithId } from '@medplum/core';
 import { getExtension } from '@medplum/core';
 import type { AsyncJob, Parameters, Subscription } from '@medplum/fhirtypes';
-import type { ConnectionOptions, Job, Processor, QueueOptions, WorkerOptions } from 'bullmq';
+import type { Job, Processor, QueueOptions, WorkerOptions } from 'bullmq';
 import { DelayedError, UnrecoverableError } from 'bullmq';
 import * as semver from 'semver';
 import type { MedplumBullmqConfig, WorkerName } from '../config/types';
@@ -14,7 +14,6 @@ import type { Repository } from '../fhir/repo';
 import { getLogger, globalLogger } from '../logger';
 import type { AuthState } from '../oauth/middleware';
 import { addToUpDownCounter, BASE_METRIC_OPTIONS, getQueueMetricName, incrementCounter } from '../otel/otel';
-import { reconnectOnError } from '../redis';
 import { getServerVersion } from '../util/version';
 import type { Queue, QueueConnection, Worker } from './backend';
 import { getQueueBackendOptions } from './backend';
@@ -144,8 +143,8 @@ export class DefaultQueueRegistry implements QueueRegistry {
 
   async closeAll(): Promise<void> {
     const errors: unknown[] = [];
-    // Close workers in reverse registration order. Continue closing the remaining
-    // resources if one fails, so checked-out PostgreSQL listeners are released.
+    // Drain each worker before closing its queue so finishing jobs can enqueue follow-up work.
+    // Continue closing resources in reverse registration order if one fails, releasing PostgreSQL listeners.
     for (let i = this.queues.length - 1; i >= 0; i--) {
       const entry = this.queues[i];
       if (entry.worker) {
@@ -396,10 +395,6 @@ export function getWorkerBullmqConfig(
   // property. It rides along as an inert excess key on the returned object (harmless, since `Worker`
   // ignores unrecognized options)
   return { ...queueOptions, ...getMedplumBullmqConfig(config, workerName, workerDefaults) };
-}
-
-export function getBullmqRedisConnectionOptions(config: ServerConfig): ConnectionOptions {
-  return { ...(config.backgroundJobsRedis ?? config.redis), reconnectOnError };
 }
 
 export function defaultQueueOptions(config: ServerConfig): QueueOptions<QueueConnection> {

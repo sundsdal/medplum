@@ -4,6 +4,7 @@ import { MEDPLUM_VERSION } from '@medplum/core';
 import type { Request, Response } from 'express';
 import os from 'node:os';
 import type { PoolClient } from 'pg';
+import { getConfig } from './config/loader';
 import { DatabaseMode, getDatabasePool } from './database';
 import { GLOBAL_SHARD_ID } from './fhir/sharding';
 import type { RecordMetricOptions } from './otel/otel';
@@ -21,21 +22,23 @@ const METRIC_IN_SECS_OPTIONS = { ...BASE_METRIC_OPTIONS, options: { unit: 's' } 
 const shardConns: Record<string, Map<DatabaseMode, Promise<PoolClient>>> = {};
 
 export async function healthcheckHandler(_req: Request, res: Response): Promise<void> {
-  const globalShardResults = await testShardDatabaseConnections(GLOBAL_SHARD_ID);
-
   const redisChecks = getAllRedisInstances();
-  const redisResults = await Promise.all(
-    redisChecks.map(async ({ label, instance }) => {
-      const t0 = Date.now();
-      const ok = await testRedis(instance);
-      const roundtripMs = Date.now() - t0;
-      setGauge('medplum.redis.healthcheckRTT', roundtripMs / 1000, {
-        ...METRIC_IN_SECS_OPTIONS,
-        attributes: { ...METRIC_IN_SECS_OPTIONS.attributes, redisInstanceType: label },
-      });
-      return { label, ok };
-    })
-  );
+  const [globalShardResults, queueResult, redisResults] = await Promise.all([
+    testShardDatabaseConnections(GLOBAL_SHARD_ID),
+    testQueueBackend(getConfig()),
+    Promise.all(
+      redisChecks.map(async ({ label, instance }) => {
+        const t0 = Date.now();
+        const ok = await testRedis(instance);
+        const roundtripMs = Date.now() - t0;
+        setGauge('medplum.redis.healthcheckRTT', roundtripMs / 1000, {
+          ...METRIC_IN_SECS_OPTIONS,
+          attributes: { ...METRIC_IN_SECS_OPTIONS.attributes, redisInstanceType: label },
+        });
+        return { label, ok };
+      })
+    ),
+  ]);
 
   const redisResult: Record<string, boolean> = {};
   for (const { label, ok } of redisResults) {
@@ -52,7 +55,7 @@ export async function healthcheckHandler(_req: Request, res: Response): Promise<
     postgresReader: globalShardResults.readerOk,
     redis: redisResult.default,
     redisInstances: redisResult,
-    backgroundJobs: (await testQueueBackend()) ?? redisResult.backgroundJobs ?? redisResult.default,
+    backgroundJobs: queueResult ?? redisResult.backgroundJobs ?? redisResult.default,
   });
 }
 
