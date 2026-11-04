@@ -328,7 +328,11 @@ export async function shutdownApp(): Promise<void> {
     server = undefined;
   }
 
-  await closeWorkers();
+  try {
+    await closeWorkers();
+  } catch (err) {
+    globalLogger.error('Error closing background jobs', { err });
+  }
   await closeDatabase();
   closeAgentCallbackSubscriber();
   await closeRedis();

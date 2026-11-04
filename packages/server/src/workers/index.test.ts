@@ -12,6 +12,7 @@ import { getLogger } from '../logger';
 import { closeRedis, initRedis } from '../redis';
 import { seedDatabase } from '../seed';
 import { initBinaryStorage } from '../storage/loader';
+import * as backendModule from './backend';
 import * as cronModule from './cron';
 import * as dispatchModule from './dispatch';
 import * as downloadModule from './download';
@@ -21,6 +22,20 @@ import { queueRegistry } from './utils';
 describe('Workers', () => {
   beforeAll(() => {
     loadStructureDefinitions();
+  });
+
+  test('preserves registry and backend errors when closing workers', async () => {
+    const registryError = new Error('registry close failed');
+    const backendError = new Error('backend close failed');
+    const registrySpy = vi.spyOn(queueRegistry, 'closeAll').mockRejectedValueOnce(registryError);
+    const backendSpy = vi.spyOn(backendModule, 'closeQueueBackend').mockRejectedValueOnce(backendError);
+    try {
+      await expect(closeWorkers()).rejects.toMatchObject({ errors: [registryError, backendError] });
+      expect(backendSpy).toHaveBeenCalledOnce();
+    } finally {
+      registrySpy.mockRestore();
+      backendSpy.mockRestore();
+    }
   });
 
   test('Init and close', async () => {

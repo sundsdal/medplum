@@ -85,6 +85,24 @@ describe('Config', () => {
     ).toHaveLength(1);
   });
 
+  test('Loads queue PostgreSQL secrets with typed SSM settings', async () => {
+    mockSSMClient.on(GetParametersByPathCommand).resolves({
+      Parameters: [
+        { Name: 'baseUrl', Value: 'https://www.example.com/' },
+        { Name: 'BackgroundJobsPostgresSecrets', Value: 'QueueSecret' },
+        { Name: 'backgroundJobs', Value: JSON.stringify({ backend: 'postgres', postgres: { maxConnections: 32 } }) },
+      ],
+    });
+    mockSecretsManagerClient
+      .on(GetSecretValueCommand, { SecretId: 'QueueSecret' })
+      .resolves({ SecretString: JSON.stringify({ connectionString: 'postgres://localhost/jobs' }) });
+    const config = await loadConfig('aws:test');
+    expect(config.backgroundJobs).toEqual({
+      backend: 'postgres',
+      postgres: { connectionString: 'postgres://localhost/jobs', maxConnections: 32 },
+    });
+  });
+
   test('Loads shard database secrets and typed shard parameters', async () => {
     mockSSMClient.on(GetParametersByPathCommand).resolves({
       Parameters: [

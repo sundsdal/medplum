@@ -3,7 +3,7 @@
 import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import type { Parameter } from '@aws-sdk/client-ssm';
 import { GetParametersByPathCommand, SSMClient } from '@aws-sdk/client-ssm';
-import { splitN } from '@medplum/core';
+import { isObject, splitN } from '@medplum/core';
 import type { MedplumServerConfig } from '../../config/types';
 import { setValue } from '../../config/utils';
 import { isValidShardId } from '../../fhir/sharding';
@@ -57,6 +57,9 @@ export async function loadAwsConfig(path: string): Promise<MedplumServerConfig> 
       config['pubSubRedis'] = await loadAwsSecrets(region, value);
     } else if (key === 'BackgroundJobsRedisSecrets') {
       config['backgroundJobsRedis'] = await loadAwsSecrets(region, value);
+    } else if (key === 'BackgroundJobsPostgresSecrets') {
+      config.backgroundJobs ??= {};
+      config.backgroundJobs.postgres = await loadAwsSecrets(region, value);
     } else if (/^shards\.[^.]+\.(Reader)?DatabaseSecrets$/.test(key)) {
       const [, shardId, secretKey] = key.split('.');
       if (!isValidShardId(shardId)) {
@@ -75,7 +78,22 @@ export async function loadAwsConfig(path: string): Promise<MedplumServerConfig> 
   for (const param of parameters) {
     const key = (param.Name as string).replace(path, '');
     const value = param.Value as string;
-    setValue(config, key, value);
+    if (key === 'backgroundJobs' || key === 'backgroundJobs.postgres') {
+      const overlay: Record<string, unknown> = {};
+      setValue(overlay, key, value);
+      const previous = config.backgroundJobs ?? {};
+      const next = overlay.backgroundJobs;
+      if (isObject(next)) {
+        config.backgroundJobs = { ...previous, ...next };
+        if (isObject(next.postgres)) {
+          config.backgroundJobs.postgres = { ...previous.postgres, ...next.postgres };
+        }
+      } else {
+        config.backgroundJobs = next;
+      }
+    } else {
+      setValue(config, key, value);
+    }
   }
 
   return config as MedplumServerConfig;

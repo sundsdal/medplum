@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
 import { randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
+import { DelayedError } from 'bullmq';
+import type { Pool } from 'pg';
 import type { ServerConfig } from '../config/utils';
 import {
   closeQueueBackend,
@@ -31,7 +34,7 @@ integration('PostgreSQL background jobs', () => {
       if (Date.now() >= end) {
         throw new Error('Timed out waiting for queue condition');
       }
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      await delay(50);
     }
   }
 
@@ -52,11 +55,11 @@ integration('PostgreSQL background jobs', () => {
   });
 
   test('migrates, reports health, processes a job and persists it across backend restart', async () => {
-    expect(await testQueueBackend()).toBe(true);
+    expect(await testQueueBackend(config)).toBe(true);
     const job = await queue.add('persist', { value: 42 });
     await queue.close();
     await closeQueueBackend();
-    expect(await testQueueBackend()).toBeUndefined();
+    expect(await testQueueBackend(config)).toBe(false);
 
     await initQueueBackend(config, 2);
     queue = new Queue(queue.name, { connection: getQueueBackendOptions(config) });
@@ -74,6 +77,41 @@ integration('PostgreSQL background jobs', () => {
       async () => (await queue.getJob(job.id as string))?.getState().then((state) => state === 'completed') ?? false
     );
     expect(seen).toEqual([{ value: 42 }]);
+  });
+
+  test('preserves URL options while forcing the queue schema', async () => {
+    await queue.close();
+    await closeQueueBackend();
+    const url = new URL(connectionString as string);
+    url.searchParams.set('options', '-c search_path=public -c statement_timeout=12345');
+    const optionsConfig = {
+      backgroundJobs: { backend: 'postgres', postgres: { connectionString: url.toString(), maxConnections: 8 } },
+    } as unknown as ServerConfig;
+    await initQueueBackend(optionsConfig, 2);
+    queue = new Queue(queue.name, { connection: getQueueBackendOptions(optionsConfig) });
+    const pool = getQueueBackendOptions(optionsConfig) as Pool;
+    const result = await pool.query(
+      "SELECT current_setting('search_path') AS path, current_setting('statement_timeout') AS timeout"
+    );
+    expect(result.rows[0]).toEqual({ path: 'bullmq', timeout: '12345ms' });
+    const job = await queue.add('isolated', {});
+    expect(await queue.getJob(job.id as string)).toBeDefined();
+  });
+
+  test('health stays available when ordinary pool connections are occupied', async () => {
+    const pool = getQueueBackendOptions(config) as Pool;
+    const clients = [];
+    try {
+      for (let i = 0; i < 7; i++) {
+        clients.push(await pool.connect());
+      }
+      expect(await testQueueBackend(config)).toBe(true);
+    } finally {
+      for (const client of clients) {
+        client.release();
+      }
+    }
+    expect(await queue.add('after-load', {})).toBeDefined();
   });
 
   test('retries a failed job after its backoff', async () => {
@@ -96,6 +134,96 @@ integration('PostgreSQL background jobs', () => {
     );
     expect(attempts).toHaveLength(2);
     expect(attempts[1] - attempts[0]).toBeGreaterThanOrEqual(250);
+  });
+
+  test('redelivers a job moved to delayed without failing it', async () => {
+    const attempts: number[] = [];
+    let failures = 0;
+    const worker = new Worker(
+      queue.name,
+      async (job) => {
+        attempts.push(Date.now());
+        if (attempts.length === 1) {
+          expect(job.token).toBeDefined();
+          await job.moveToDelayed(Date.now() + 300, job.token);
+          throw new DelayedError('try later');
+        }
+      },
+      { connection: getQueueBackendOptions(config) }
+    );
+    worker.on('failed', () => {
+      failures++;
+    });
+    workers.push(worker);
+    const job = await queue.add('delayed', {});
+    await waitFor(
+      async () => (await queue.getJob(job.id as string))?.getState().then((state) => state === 'completed') ?? false
+    );
+    expect(attempts).toHaveLength(2);
+    expect(attempts[1] - attempts[0]).toBeGreaterThanOrEqual(250);
+    expect(failures).toBe(0);
+    expect((await queue.getJobCounts('failed')).failed).toBe(0);
+  });
+
+  test('deduplicates until the original job completes', async () => {
+    const options = { deduplication: { id: 'same-key' } };
+    const first = await queue.add('dedup', { value: 1 }, options);
+    const duplicate = await queue.add('dedup', { value: 2 }, options);
+    expect(duplicate.id).toBe(first.id);
+    expect((await queue.getJob(first.id as string))?.data).toEqual({ value: 1 });
+    const seen: number[] = [];
+    workers.push(
+      new Worker(
+        queue.name,
+        async (job) => {
+          seen.push(job.data.value);
+        },
+        { connection: getQueueBackendOptions(config) }
+      )
+    );
+    await waitFor(
+      async () => (await queue.getJob(first.id as string))?.getState().then((state) => state === 'completed') ?? false
+    );
+    const next = await queue.add('dedup', { value: 3 }, options);
+    expect(next.id).not.toBe(first.id);
+    await waitFor(
+      async () => (await queue.getJob(next.id as string))?.getState().then((state) => state === 'completed') ?? false
+    );
+    expect(seen).toEqual([1, 3]);
+  });
+
+  test('retains only one completed and one failed job', async () => {
+    workers.push(
+      new Worker(
+        queue.name,
+        async (job) => {
+          if (job.name === 'fail') {
+            throw new Error('expected failure');
+          }
+        },
+        { connection: getQueueBackendOptions(config), concurrency: 1 }
+      )
+    );
+    for (const name of ['complete', 'complete', 'fail', 'fail']) {
+      const job = await queue.add(name, {}, { removeOnComplete: { count: 1 }, removeOnFail: { count: 1 } });
+      const expected = name === 'fail' ? 'failed' : 'completed';
+      await waitFor(
+        async () => (await queue.getJob(job.id as string))?.getState().then((state) => state === expected) ?? false
+      );
+    }
+    await waitFor(async () => {
+      const counts = await queue.getJobCounts('completed', 'failed');
+      return counts.completed === 1 && counts.failed === 1;
+    });
+    await workers[0].close();
+    workers = [];
+    await queue.close();
+    await closeQueueBackend();
+    await initQueueBackend(config, 2);
+    queue = new Queue(queue.name, { connection: getQueueBackendOptions(config) });
+    const counts = await queue.getJobCounts('completed', 'failed');
+    expect(counts.completed).toBe(1);
+    expect(counts.failed).toBe(1);
   });
 
   test('runs a recurring scheduler and removes it', async () => {
@@ -125,7 +253,7 @@ integration('PostgreSQL background jobs', () => {
         async () => {
           active++;
           peak = Math.max(peak, active);
-          await new Promise((resolve) => setTimeout(resolve, 250));
+          await delay(250);
           active--;
           finished++;
         },
@@ -145,7 +273,7 @@ integration('PostgreSQL background jobs', () => {
     const processor = async (): Promise<void> => {
       active++;
       peak = Math.max(peak, active);
-      await new Promise((resolve) => setTimeout(resolve, 150));
+      await delay(150);
       active--;
       finished++;
     };
@@ -198,7 +326,7 @@ integration('Medplum worker registration', () => {
     for (const name of names) {
       expect(queueRegistry.get(name)).toBeUndefined();
     }
-    expect(await testQueueBackend()).toBeUndefined();
+    expect(await testQueueBackend(config)).toBe(false);
   }, 60_000);
 });
 
@@ -235,7 +363,7 @@ redisIntegration('default Redis background jobs', () => {
         if (Date.now() >= deadline) {
           throw new Error('Timed out waiting for Redis job');
         }
-        await new Promise((resolve) => setTimeout(resolve, 50));
+        await delay(50);
       }
       expect(seen).toEqual([{ value: 42 }]);
     } finally {

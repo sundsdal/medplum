@@ -10,6 +10,7 @@ import { loadAzureConfig } from '../cloud/azure/config';
 import { loadGcpConfig } from '../cloud/gcp/config';
 import { isReservedShardId, isValidShardId } from '../fhir/sharding';
 import { globalLogger } from '../logger';
+import { DEFAULT_POSTGRES_QUEUE_CONNECTIONS, getEnabledWorkerNames, validatePostgresPoolSize } from './background-jobs';
 import type { MedplumServerConfig } from './types';
 import type { ServerConfig } from './utils';
 import {
@@ -83,7 +84,10 @@ export async function loadConfig(configName: string): Promise<ServerConfig> {
   return cachedConfig;
 }
 
-/** Validate queue storage settings from untyped configuration sources. */
+/**
+ * Validates queue storage settings from untyped configuration sources.
+ * @param config - The merged server configuration.
+ */
 function validateBackgroundJobsConfig(config: MedplumServerConfig): void {
   const jobs: unknown = config.backgroundJobs;
   if (jobs === undefined) {
@@ -101,9 +105,10 @@ function validateBackgroundJobsConfig(config: MedplumServerConfig): void {
       throw new Error('Invalid backgroundJobs config: postgres.connectionString is required');
     }
     const max = jobs.postgres.maxConnections;
-    if (max !== undefined && (!Number.isInteger(max) || (max as number) < 2)) {
-      throw new Error('Invalid backgroundJobs config: postgres.maxConnections must be an integer of at least 2');
+    if (max !== undefined && typeof max !== 'number') {
+      throw new Error('backgroundJobs.postgres.maxConnections must be an integer');
     }
+    validatePostgresPoolSize(max ?? DEFAULT_POSTGRES_QUEUE_CONNECTIONS, getEnabledWorkerNames(config).length);
   }
 }
 

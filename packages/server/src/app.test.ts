@@ -17,6 +17,8 @@ import { generateAccessToken } from './oauth/keys';
 import { getRateLimitRedis } from './redis';
 import type { TestRedisConfig } from './test.setup';
 import { createTestProject, deleteRedisKeys, getSuperAdminAccessToken, initTestAuth } from './test.setup';
+import * as workers from './workers';
+import * as database from './database';
 
 describe('App', () => {
   let stdOutSpy: MockInstance;
@@ -27,6 +29,24 @@ describe('App', () => {
 
   afterEach(() => {
     stdOutSpy.mockRestore();
+  });
+
+  test('continues shutdown when closing workers fails', async () => {
+    const config = await loadTestConfig();
+    await initApp(express(), config);
+    const closeWorkers = workers.closeWorkers;
+    const closeWorkersSpy = vi.spyOn(workers, 'closeWorkers').mockImplementationOnce(async () => {
+      await closeWorkers();
+      throw new Error('close failed');
+    });
+    const closeDatabaseSpy = vi.spyOn(database, 'closeDatabase');
+    try {
+      await expect(shutdownApp()).resolves.toBeUndefined();
+      expect(closeDatabaseSpy).toHaveBeenCalledOnce();
+    } finally {
+      closeWorkersSpy.mockRestore();
+      closeDatabaseSpy.mockRestore();
+    }
   });
 
   test('Get HTTP config', async () => {
