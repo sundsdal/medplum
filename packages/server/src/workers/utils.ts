@@ -138,7 +138,7 @@ export class DefaultQueueRegistry implements QueueRegistry {
   }
 
   get<T>(name: string): Queue<T> | undefined {
-    return this.queues.find((q) => q.name === name)?.queue as Queue<T> | undefined;
+    return this.queues.find((q) => q.name === name)?.queue;
   }
 
   async closeAll(): Promise<void> {

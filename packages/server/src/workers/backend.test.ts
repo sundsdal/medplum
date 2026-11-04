@@ -16,7 +16,9 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('pg', () => ({
   Pool: class {
-    constructor(options: unknown) { mocks.poolOptions(options); }
+    constructor(options: unknown) {
+      mocks.poolOptions(options);
+    }
     query = mocks.poolQuery;
     connect = mocks.connect;
     end = mocks.end;
@@ -83,7 +85,12 @@ describe('queue backend lifecycle', () => {
   test('shares an in-flight reserved health query', async () => {
     await initQueueBackend(postgres, 2);
     let resolveQuery: (() => void) | undefined;
-    mocks.query.mockImplementationOnce(() => new Promise<void>((resolve) => { resolveQuery = resolve; }));
+    mocks.query.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveQuery = resolve;
+        })
+    );
     const checks = [testQueueBackend(postgres), testQueueBackend(postgres)];
     await Promise.resolve();
     expect(mocks.query).toHaveBeenCalledOnce();
@@ -91,17 +98,20 @@ describe('queue backend lifecycle', () => {
     expect(await Promise.all(checks)).toEqual([true, true]);
   });
 
-  test('preserves connection options and appends a search path override', async () => {
+  test('preserves connection options and appends queue-specific overrides', async () => {
     const config = {
       backgroundJobs: {
         backend: 'postgres',
-        postgres: { connectionString: 'postgres://localhost/jobs?options=-c%20statement_timeout%3D1000%20-c%20search_path%3Dpublic' },
+        postgres: {
+          connectionString:
+            'postgres://localhost/jobs?options=-c%20statement_timeout%3D1000%20-c%20search_path%3Dpublic',
+        },
       },
     } as ServerConfig;
     await initQueueBackend(config, 0);
     const { connectionString } = mocks.poolOptions.mock.calls[0][0] as { connectionString: string };
     expect(new URL(connectionString).searchParams.get('options')).toBe(
-      '-c statement_timeout=1000 -c search_path=public -c search_path=bullmq'
+      '-c statement_timeout=1000 -c search_path=public -c search_path=bullmq -c default_transaction_isolation=read\\ committed'
     );
   });
 
@@ -122,7 +132,10 @@ describe('queue backend lifecycle', () => {
     const config = {
       backgroundJobs: { backend: 'postgres', postgres: { connectionString: 'postgres://user:secret@[' } },
     } as ServerConfig;
-    const error = await initQueueBackend(config, 1).then(() => undefined, (err: Error) => err);
+    const error = await initQueueBackend(config, 1).then(
+      () => undefined,
+      (err: Error) => err
+    );
     if (!(error instanceof Error)) {
       throw new Error('Expected an invalid URL error');
     }
@@ -131,11 +144,12 @@ describe('queue backend lifecycle', () => {
     expect(mocks.connect).not.toHaveBeenCalled();
   });
 
-  test.each([
-    ['https://localhost/jobs', 'PostgreSQL URL'],
-  ])('rejects unsupported PostgreSQL connection URL %s', async (connectionString, message) => {
-    const config = { backgroundJobs: { backend: 'postgres', postgres: { connectionString } } } as ServerConfig;
-    await expect(initQueueBackend(config, 1)).rejects.toThrow(message);
-    expect(mocks.connect).not.toHaveBeenCalled();
-  });
+  test.each([['https://localhost/jobs', 'PostgreSQL URL']])(
+    'rejects unsupported PostgreSQL connection URL %s',
+    async (connectionString, message) => {
+      const config = { backgroundJobs: { backend: 'postgres', postgres: { connectionString } } } as ServerConfig;
+      await expect(initQueueBackend(config, 1)).rejects.toThrow(message);
+      expect(mocks.connect).not.toHaveBeenCalled();
+    }
+  );
 });

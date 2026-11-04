@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
+import { DelayedError } from 'bullmq';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { DelayedError } from 'bullmq';
 import type { Pool } from 'pg';
 import type { ServerConfig } from '../config/utils';
 import {
@@ -46,12 +46,18 @@ integration('PostgreSQL background jobs', () => {
   });
 
   afterEach(async () => {
-    for (const worker of workers) {
-      await worker.close();
+    try {
+      for (const worker of workers) {
+        await worker.close();
+      }
+      await queue.obliterate({ force: true });
+    } finally {
+      try {
+        await queue.close();
+      } finally {
+        await closeQueueBackend();
+      }
     }
-    await queue.obliterate({ force: true });
-    await queue.close();
-    await closeQueueBackend();
   });
 
   test('migrates, reports health, processes a job and persists it across backend restart', async () => {
@@ -83,7 +89,10 @@ integration('PostgreSQL background jobs', () => {
     await queue.close();
     await closeQueueBackend();
     const url = new URL(connectionString as string);
-    url.searchParams.set('options', '-c search_path=public -c statement_timeout=12345');
+    url.searchParams.set(
+      'options',
+      '-c search_path=public -c statement_timeout=12345 -c default_transaction_isolation=repeatable\\ read'
+    );
     const optionsConfig = {
       backgroundJobs: { backend: 'postgres', postgres: { connectionString: url.toString(), maxConnections: 8 } },
     } as unknown as ServerConfig;
@@ -91,11 +100,26 @@ integration('PostgreSQL background jobs', () => {
     queue = new Queue(queue.name, { connection: getQueueBackendOptions(optionsConfig) });
     const pool = getQueueBackendOptions(optionsConfig) as Pool;
     const result = await pool.query(
-      "SELECT current_setting('search_path') AS path, current_setting('statement_timeout') AS timeout"
+      "SELECT current_setting('search_path') AS path, current_setting('statement_timeout') AS timeout, current_setting('transaction_isolation') AS isolation"
     );
-    expect(result.rows[0]).toEqual({ path: 'bullmq', timeout: '12345ms' });
-    const job = await queue.add('isolated', {});
-    expect(await queue.getJob(job.id as string)).toBeDefined();
+    expect(result.rows[0]).toEqual({ path: 'bullmq', timeout: '12345ms', isolation: 'read committed' });
+    const seen: number[] = [];
+    for (let i = 0; i < 2; i++) {
+      workers.push(
+        new Worker(
+          queue.name,
+          async (job) => {
+            seen.push(job.data.value);
+          },
+          { connection: pool }
+        )
+      );
+    }
+    const jobs = await Promise.all(Array.from({ length: 20 }, (_, value) => queue.add('isolated', { value })));
+    await waitFor(async () =>
+      (await Promise.all(jobs.map((job) => job.getState()))).every((state) => state === 'completed')
+    );
+    expect(seen.sort((a, b) => a - b)).toEqual(Array.from({ length: 20 }, (_, value) => value));
   });
 
   test('health stays available when ordinary pool connections are occupied', async () => {

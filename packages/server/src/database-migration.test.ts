@@ -46,10 +46,10 @@ import { generateAccessToken } from './oauth/keys';
 import { getSuperAdminTestProject, TEST_SHARD_ID, withTestContext } from './test.setup';
 import * as version from './util/version';
 import * as workers from './workers';
+import type { Queue } from './workers/backend';
 import type * as PostDeployMigration from './workers/post-deploy-migration';
 import { PostDeployMigrationQueueName, prepareCustomMigrationJobData } from './workers/post-deploy-migration';
 import type { ReindexJobData } from './workers/reindex';
-import type { Queue } from './workers/backend';
 import { getReindexQueue, prepareReindexJobData, ReindexJob } from './workers/reindex';
 import { queueRegistry } from './workers/utils';
 
