@@ -11,7 +11,7 @@ import {
   parseSearchRequest,
 } from '@medplum/core';
 import type { AsyncJob, Login, Practitioner, Project, ProjectMembership, User } from '@medplum/fhirtypes';
-import type { Job, Queue } from 'bullmq';
+import type { Job } from 'bullmq';
 import { randomUUID } from 'crypto';
 import express from 'express';
 import request from 'supertest';
@@ -47,6 +47,7 @@ import * as version from './util/version';
 import * as workers from './workers';
 import { PostDeployMigrationQueueName, prepareCustomMigrationJobData } from './workers/post-deploy-migration';
 import type { ReindexJobData } from './workers/reindex';
+import type { Queue } from './workers/backend';
 import { getReindexQueue, prepareReindexJobData, ReindexJob } from './workers/reindex';
 import { queueRegistry } from './workers/utils';
 
