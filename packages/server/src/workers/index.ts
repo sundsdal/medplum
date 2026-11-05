@@ -43,7 +43,7 @@ const workerDefs: Record<WorkerName, WorkerInitializer> = {
 export async function initWorkers(config: ServerConfig): Promise<void> {
   globalLogger.debug('Initializing workers...');
   const enabledWorkers = new Set(getEnabledWorkerNames(config));
-  await initQueueBackend(config, enabledWorkers.size);
+  await initQueueBackend(config);
   try {
     for (const name of WORKER_NAMES) {
       const init = workerDefs[name];

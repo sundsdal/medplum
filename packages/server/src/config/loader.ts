@@ -10,7 +10,7 @@ import { loadAzureConfig } from '../cloud/azure/config';
 import { loadGcpConfig } from '../cloud/gcp/config';
 import { isReservedShardId, isValidShardId } from '../fhir/sharding';
 import { globalLogger } from '../logger';
-import { DEFAULT_POSTGRES_QUEUE_CONNECTIONS, getEnabledWorkerNames, validatePostgresPoolSize } from './background-jobs';
+import { DEFAULT_POSTGRES_QUEUE_CONNECTIONS, validatePostgresPoolSize } from './background-jobs';
 import type { MedplumServerConfig } from './types';
 import type { ServerConfig } from './utils';
 import {
@@ -108,7 +108,7 @@ function validateBackgroundJobsConfig(config: MedplumServerConfig): void {
     if (max !== undefined && typeof max !== 'number') {
       throw new Error('backgroundJobs.postgres.maxConnections must be an integer');
     }
-    validatePostgresPoolSize(max ?? DEFAULT_POSTGRES_QUEUE_CONNECTIONS, getEnabledWorkerNames(config).length);
+    validatePostgresPoolSize(max ?? DEFAULT_POSTGRES_QUEUE_CONNECTIONS);
   }
 }
 

@@ -22,13 +22,13 @@ Add `backgroundJobs` to the JSON server configuration. Store the connection stri
     "backend": "postgres",
     "postgres": {
       "connectionString": "postgres://medplum_jobs:secret@db.example.com:5432/medplum_jobs",
-      "maxConnections": 32
+      "maxConnections": 4
     }
   }
 }
 ```
 
-`maxConnections` limits the queue pool **per server instance** and defaults to `32`. It must be an integer of at least `2 × enabled workers + 2`: one listener per worker, capacity for worker queries, and a health-check reserve. This minimum is a starting point, not a guarantee of sufficient capacity. Account for total worker concurrency, tune the pool through load testing, and include all instances when sizing PostgreSQL’s connection limit. The queue database can be separate from Medplum’s FHIR database. Use a direct connection or PgBouncer session pooling: transaction pooling does not preserve the sessions needed for notifications. For TLS, configure certificate verification through the PostgreSQL URL, including `sslmode=verify-full` and `sslrootcert` pointing to a trusted CA certificate accessible to the server.
+`maxConnections` limits the separate queue pool **per server instance** and defaults to `4`, its minimum. All workers share one LISTEN session; one connection is reserved for health checks, leaving two connections for queue queries. The shared listener is named `medplum-background-jobs` rather than exposing individual workers through PostgreSQL worker discovery. This minimum is a starting point, not a guarantee of sufficient capacity. Account for total worker concurrency, tune the pool through load testing, and include all instances when sizing PostgreSQL’s connection limit. The queue database can be separate from Medplum’s FHIR database. Use a direct connection or PgBouncer session pooling: transaction pooling does not preserve the sessions needed for notifications. For TLS, configure certificate verification through the PostgreSQL URL, including `sslmode=verify-full` and `sslrootcert` pointing to a trusted CA certificate accessible to the server.
 
 Queue pool connections use the `read committed` transaction isolation level required by the queue backend, overriding any database default or URL startup option for that setting. This does not change the isolation level of the FHIR database pool.
 

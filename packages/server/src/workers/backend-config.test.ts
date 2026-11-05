@@ -36,8 +36,8 @@ describe('background job configuration', () => {
   test('sizes pools for enabled workers', () => {
     const config = { workers: { enabled: ['cron', 'batch'] } } as unknown as MedplumServerConfig;
     expect(getEnabledWorkerNames(config)).toEqual(['cron', 'batch']);
-    expect(() => validatePostgresPoolSize(5, 2)).toThrow('at least 6');
-    expect(() => validatePostgresPoolSize(6, 2)).not.toThrow();
+    expect(() => validatePostgresPoolSize(3)).toThrow('at least 4');
+    expect(() => validatePostgresPoolSize(4)).not.toThrow();
     expect(getEnabledWorkerNames({ workers: { enabled: [] } } as unknown as MedplumServerConfig)).toEqual([]);
     expect(getEnabledWorkerNames({ workers: { enabled: ['*'] } } as unknown as MedplumServerConfig)).toHaveLength(11);
   });

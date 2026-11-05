@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   end: vi.fn(),
   migrate: vi.fn(),
   poolOptions: vi.fn(),
+  connectionClose: vi.fn(),
 }));
 
 vi.mock('pg', () => ({
@@ -26,10 +27,19 @@ vi.mock('pg', () => ({
     on = vi.fn();
   },
 }));
-vi.mock('bullmq', async (importOriginal) => ({
-  ...(await importOriginal<typeof BullMQ>()),
-  runMigrations: mocks.migrate,
-}));
+vi.mock('bullmq', async (importOriginal) => {
+  const { EventEmitter } = await import('node:events');
+  return {
+    ...(await importOriginal<typeof BullMQ>()),
+    runMigrations: mocks.migrate,
+    PostgresConnection: class extends EventEmitter {
+      waitUntilReady = vi.fn().mockResolvedValue(undefined);
+      setListenClientName = vi.fn().mockResolvedValue(undefined);
+      getListenClient = vi.fn().mockResolvedValue({});
+      close = mocks.connectionClose;
+    },
+  };
+});
 
 import { closeQueueBackend, getQueueBackendOptions, initQueueBackend, testQueueBackend } from './backend';
 
@@ -46,6 +56,7 @@ describe('queue backend lifecycle', () => {
     mocks.connect.mockResolvedValue({ release: mocks.release, query: mocks.query, on: vi.fn() });
     mocks.migrate.mockResolvedValue(undefined);
     mocks.end.mockResolvedValue(undefined);
+    mocks.connectionClose.mockResolvedValue(undefined);
     mocks.query.mockResolvedValue({ rows: [{ status: 1 }] });
   });
 
@@ -53,7 +64,7 @@ describe('queue backend lifecycle', () => {
 
   test('uses Redis by default, including its dedicated background-jobs connection', async () => {
     const config = { redis: { host: 'general' }, backgroundJobsRedis: { host: 'jobs' } } as ServerConfig;
-    await initQueueBackend(config, 0);
+    await initQueueBackend(config);
     expect(getQueueBackendOptions(config)).toMatchObject({ host: 'jobs' });
     expect(await testQueueBackend(config)).toBeUndefined();
     expect(mocks.connect).not.toHaveBeenCalled();
@@ -61,7 +72,7 @@ describe('queue backend lifecycle', () => {
 
   test('migrates before exposing the pool, reports health and closes it', async () => {
     expect(() => getQueueBackendOptions(postgres)).toThrow('not initialized');
-    await initQueueBackend(postgres, 2);
+    await initQueueBackend(postgres);
     expect(mocks.migrate).toHaveBeenCalledOnce();
     expect(mocks.release).toHaveBeenCalledOnce();
     expect(await testQueueBackend(postgres)).toBe(true);
@@ -76,14 +87,14 @@ describe('queue backend lifecycle', () => {
 
   test('closes the pool and releases the client when migration fails', async () => {
     mocks.migrate.mockRejectedValueOnce(new Error('migration failed'));
-    await expect(initQueueBackend(postgres, 2)).rejects.toThrow('migration failed');
+    await expect(initQueueBackend(postgres)).rejects.toThrow('migration failed');
     expect(mocks.release).toHaveBeenCalledOnce();
     expect(mocks.end).toHaveBeenCalledOnce();
     expect(() => getQueueBackendOptions(postgres)).toThrow('not initialized');
   });
 
   test('shares an in-flight reserved health query', async () => {
-    await initQueueBackend(postgres, 2);
+    await initQueueBackend(postgres);
     let resolveQuery: (() => void) | undefined;
     mocks.query.mockImplementationOnce(
       () =>
@@ -108,11 +119,19 @@ describe('queue backend lifecycle', () => {
         },
       },
     } as ServerConfig;
-    await initQueueBackend(config, 0);
+    await initQueueBackend(config);
     const { connectionString } = mocks.poolOptions.mock.calls[0][0] as { connectionString: string };
     expect(new URL(connectionString).searchParams.get('options')).toBe(
       '-c statement_timeout=1000 -c search_path=public -c search_path=bullmq -c default_transaction_isolation=read\\ committed'
     );
+  });
+
+  test('releases the health client and pool when the shared listener fails to close', async () => {
+    await initQueueBackend(postgres);
+    mocks.connectionClose.mockRejectedValueOnce(new Error('listener close failed'));
+    await expect(closeQueueBackend()).rejects.toThrow('listener close failed');
+    expect(mocks.release).toHaveBeenCalledWith(true);
+    expect(mocks.end).toHaveBeenCalledOnce();
   });
 
   test('preserves startup and cleanup failures', async () => {
@@ -120,11 +139,17 @@ describe('queue backend lifecycle', () => {
     const cleanup = new Error('close failed');
     mocks.migrate.mockRejectedValueOnce(startup);
     mocks.end.mockRejectedValueOnce(cleanup);
-    await expect(initQueueBackend(postgres, 2)).rejects.toMatchObject({ errors: [startup, cleanup] });
+    await expect(initQueueBackend(postgres)).rejects.toMatchObject({ errors: [startup, cleanup] });
   });
 
   test('rejects a pool too small for the enabled workers', async () => {
-    await expect(initQueueBackend(postgres, 4)).rejects.toThrow('maxConnections');
+    const tooSmall = {
+      backgroundJobs: {
+        backend: 'postgres',
+        postgres: { connectionString: 'postgres://localhost/jobs', maxConnections: 3 },
+      },
+    } as ServerConfig;
+    await expect(initQueueBackend(tooSmall)).rejects.toThrow('maxConnections');
     expect(mocks.connect).not.toHaveBeenCalled();
   });
 
@@ -132,7 +157,7 @@ describe('queue backend lifecycle', () => {
     const config = {
       backgroundJobs: { backend: 'postgres', postgres: { connectionString: 'postgres://user:secret@[' } },
     } as ServerConfig;
-    const error = await initQueueBackend(config, 1).then(
+    const error = await initQueueBackend(config).then(
       () => undefined,
       (err: Error) => err
     );
@@ -148,7 +173,7 @@ describe('queue backend lifecycle', () => {
     'rejects unsupported PostgreSQL connection URL %s',
     async (connectionString, message) => {
       const config = { backgroundJobs: { backend: 'postgres', postgres: { connectionString } } } as ServerConfig;
-      await expect(initQueueBackend(config, 1)).rejects.toThrow(message);
+      await expect(initQueueBackend(config)).rejects.toThrow(message);
       expect(mocks.connect).not.toHaveBeenCalled();
     }
   );

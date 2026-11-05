@@ -15,6 +15,7 @@ import { DEFAULT_POSTGRES_QUEUE_CONNECTIONS, validatePostgresPoolSize } from '..
 import type { ServerConfig } from '../config/utils';
 import { globalLogger } from '../logger';
 import { reconnectOnError } from '../redis';
+import { SharedPostgresBackend, SharedPostgresConnection } from './shared-postgres-backend';
 
 export type QueueConnection = ConnectionOptions | PostgresConnectionOptions;
 export type Queue<T = any> = BullQueue<T, any, string, T, any, string, IQueueBackend, QueueConnection>;
@@ -23,6 +24,9 @@ export type Worker<T = any> = BullWorker<T, any, string, IQueueBackend, any, Que
 // Select a factory per instance; never alter BullMQ's process-wide default.
 const backendFactory: BackendFactory<IQueueBackend, QueueConnection> = (name, opts, factoryOptions) => {
   if (isPgPool(opts.connection)) {
+    if (opts.connection === pool && sharedConnection) {
+      return new SharedPostgresBackend(sharedConnection, name, { ...opts, connection: opts.connection });
+    }
     return createPostgresBackend(name, { ...opts, connection: opts.connection }, factoryOptions);
   }
   return createRedisBackend(name, { ...opts, connection: opts.connection as ConnectionOptions }, factoryOptions);
@@ -30,10 +34,11 @@ const backendFactory: BackendFactory<IQueueBackend, QueueConnection> = (name, op
 export const { Queue, Worker } = withBackend(backendFactory);
 
 let pool: Pool | undefined;
+let sharedConnection: SharedPostgresConnection | undefined;
 let healthClient: Promise<PoolClient> | undefined;
 let healthCheck: Promise<boolean> | undefined;
 
-export async function initQueueBackend(config: ServerConfig, workerCount: number): Promise<void> {
+export async function initQueueBackend(config: ServerConfig): Promise<void> {
   if (config.backgroundJobs?.backend !== 'postgres') {
     return;
   }
@@ -41,7 +46,7 @@ export async function initQueueBackend(config: ServerConfig, workerCount: number
     throw new Error('Background job PostgreSQL pool is already initialized');
   }
   const { connectionString, maxConnections = DEFAULT_POSTGRES_QUEUE_CONNECTIONS } = config.backgroundJobs.postgres;
-  validatePostgresPoolSize(maxConnections, workerCount);
+  validatePostgresPoolSize(maxConnections);
   let url: URL;
   try {
     url = new URL(connectionString);
@@ -60,7 +65,9 @@ export async function initQueueBackend(config: ServerConfig, workerCount: number
   const newPool = new Pool({ connectionString: url.toString(), max: maxConnections, connectionTimeoutMillis: 5_000 });
   // BullMQ attaches a pool error listener for every queue and worker backend.
   newPool.setMaxListeners(64);
+  newPool.on('connect', (client) => client.setMaxListeners(64));
   newPool.on('error', (err) => globalLogger.error('Background job PostgreSQL pool error', { err }));
+  let connection: SharedPostgresConnection | undefined;
   try {
     const client = await newPool.connect();
     try {
@@ -70,8 +77,16 @@ export async function initQueueBackend(config: ServerConfig, workerCount: number
     }
     healthClient = reserveHealthClient(newPool);
     await healthClient;
+    connection = new SharedPostgresConnection(newPool);
+    connection.setMaxListeners(64);
+    await connection.waitUntilReady();
+    await connection.setListenClientName('medplum-background-jobs');
+    // The client carries one notification handler per concurrently waiting worker.
+    await connection.getListenClient();
+    sharedConnection = connection;
     pool = newPool;
   } catch (err) {
+    await connection?.close();
     releaseHealthClient();
     try {
       await newPool.end();
@@ -84,20 +99,26 @@ export async function initQueueBackend(config: ServerConfig, workerCount: number
 
 export async function closeQueueBackend(): Promise<void> {
   const current = pool;
+  const connection = sharedConnection;
   pool = undefined;
+  sharedConnection = undefined;
   healthCheck = undefined;
-  releaseHealthClient();
-  if (current) {
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    try {
-      await Promise.race([
-        current.end(),
-        new Promise<never>((_, reject) => {
-          timeout = setTimeout(() => reject(new Error('Timed out closing background job PostgreSQL pool')), 5_000);
-        }),
-      ]);
-    } finally {
-      clearTimeout(timeout);
+  try {
+    await connection?.close();
+  } finally {
+    releaseHealthClient();
+    if (current) {
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          current.end(),
+          new Promise<never>((_, reject) => {
+            timeout = setTimeout(() => reject(new Error('Timed out closing background job PostgreSQL pool')), 5_000);
+          }),
+        ]);
+      } finally {
+        clearTimeout(timeout);
+      }
     }
   }
 }
