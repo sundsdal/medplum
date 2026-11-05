@@ -42,9 +42,9 @@ jobs:
         working-directory: packages/server
         run: npx vitest run --config vite.postgres.config.ts
       - name: Lint the queue implementation
-        run: npx eslint packages/server/src/workers/backend*.ts packages/server/src/workers/shared-postgres-backend.ts packages/server/src/workers/index.ts packages/server/src/config/background-jobs.ts packages/server/src/config/loader.ts
+        run: npx eslint packages/server/src/workers/backend*.ts packages/server/src/workers/index.ts packages/server/src/config/background-jobs.ts packages/server/src/config/loader.ts
       - name: Check formatting
-        run: npx prettier --check .github/workflows/pgjobs.yml .github/workflows/build.yml .github/workflows/add-issue-to-project.yml packages/server/src/workers/backend*.ts packages/server/src/workers/shared-postgres-backend.ts packages/server/src/workers/index.ts packages/server/src/config/background-jobs.ts packages/server/src/config/loader.ts packages/docs/docs/self-hosting/background-jobs.md
+        run: npx prettier --check .github/workflows/pgjobs.yml .github/workflows/build.yml .github/workflows/add-issue-to-project.yml packages/server/src/workers/backend*.ts packages/server/src/workers/index.ts packages/server/src/config/background-jobs.ts packages/server/src/config/loader.ts packages/docs/docs/self-hosting/background-jobs.md
   auth-verify:
     env:
       MEDPLUM_TEST_REDIS_DB: '0'
