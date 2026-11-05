@@ -1,0 +1,47 @@
+name: PostgreSQL jobs release
+on:
+  pull_request:
+  push:
+    branches: [release/v5.2.14-pgjobs]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: pgjobs-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  verify:
+    if: github.repository == 'sundsdal/medplum'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: synthetic-ci-only
+          POSTGRES_DB: queueverify
+        ports: [5432:5432]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      MEDPLUM_TEST_QUEUE_DATABASE_URL: postgres://postgres:synthetic-ci-only@localhost:5432/queueverify
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - name: Build and typecheck the server and dependencies
+        run: npx turbo run build --filter=@medplum/server...
+      - name: Verify PostgreSQL workers, capacity and recovery without Redis
+        working-directory: packages/server
+        run: npx vitest run --config vite.postgres.config.ts
+      - name: Lint the queue implementation
+        run: npx eslint packages/server/src/workers/backend*.ts packages/server/src/workers/shared-postgres-backend.ts packages/server/src/workers/index.ts packages/server/src/config/background-jobs.ts packages/server/src/config/loader.ts
+      - name: Check formatting
+        run: npx prettier --check .github/workflows/pgjobs.yml .github/workflows/build.yml .github/workflows/add-issue-to-project.yml packages/server/src/workers/backend*.ts packages/server/src/workers/shared-postgres-backend.ts packages/server/src/workers/index.ts packages/server/src/config/background-jobs.ts packages/server/src/config/loader.ts packages/docs/docs/self-hosting/background-jobs.md
