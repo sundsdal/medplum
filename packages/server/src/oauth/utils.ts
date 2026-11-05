@@ -12,6 +12,7 @@ import {
   isJwt,
   isString,
   isUUID,
+  LRUCache,
   OperationOutcomeError,
   Operator,
   parseJWTPayload,
@@ -24,7 +25,6 @@ import type {
   AccessPolicy,
   Bot,
   ClientApplication,
-  IdentityProvider,
   Login,
   Project,
   ProjectMembership,
@@ -44,6 +44,7 @@ import { authenticator } from 'otplib';
 import { getUserConfiguration } from '../auth/me';
 import { assertMfaLoginActive, reserveMfaAttempt, tryReleaseMfaAttempt } from '../auth/mfalimit';
 import { getConfig } from '../config/loader';
+import type { ExternalIdentityProvider } from '../config/types';
 import { MFA_LOGIN_ATTEMPT_LIMIT } from '../constants';
 import { getAccessPolicyForLogin, getRepoForLogin } from '../fhir/accesspolicy';
 import { getInactiveReason, membershipProfileTypes, readMembershipReference } from '../fhir/projectmembership';
@@ -1000,7 +1001,7 @@ function includeRefreshToken(request: LoginRequest, client: ClientApplication | 
 export async function getExternalUserInfo(
   userInfoUrl: string,
   externalAccessToken: string,
-  idp?: IdentityProvider
+  idp?: ExternalIdentityProvider
 ): Promise<JWTPayload> {
   const log = getLogger();
 
@@ -1045,7 +1046,7 @@ export async function getExternalUserInfo(
 function buildExternalUserInfoRequest(
   userInfoUrl: string,
   externalAccessToken: string,
-  idp: IdentityProvider | undefined
+  idp: ExternalIdentityProvider | undefined
 ): { url: string; init: RequestInit } {
   if (idp?.userInfoMode === 'gcip') {
     const apiKey = idp.userInfoApiKey;
@@ -1085,7 +1086,10 @@ function buildExternalUserInfoRequest(
   };
 }
 
-function normalizeExternalUserInfo(body: Record<string, unknown>, idp?: IdentityProvider): Record<string, unknown> {
+function normalizeExternalUserInfo(
+  body: Record<string, unknown>,
+  idp?: ExternalIdentityProvider
+): Record<string, unknown> {
   if (idp?.userInfoMode !== 'gcip') {
     return body;
   }
@@ -1117,19 +1121,50 @@ export function isExternalEmailUnverified(userInfo: Record<string, unknown>): bo
   return userInfo.email_verified === false || userInfo.email_verified === 'false';
 }
 
-async function verifyExternalToken(idp: IdentityProvider, token: string): Promise<void> {
+const externalJwks = new LRUCache<ReturnType<typeof createRemoteJWKSet>>(64);
+
+export async function verifyExternalToken(idp: ExternalIdentityProvider, token: string): Promise<JWTPayload> {
   if (!idp.jwksUrl) {
     if (!idp.userInfoUrl) {
       throw new OperationOutcomeError(badRequest('Missing user info URL - check your identity provider configuration'));
     }
-    await getExternalUserInfo(idp.userInfoUrl, token, idp);
-    return;
+    return getExternalUserInfo(idp.userInfoUrl, token, idp);
   }
   if (!idp.issuer) {
     throw new OperationOutcomeError(badRequest('Missing issuer - check your identity provider configuration'));
   }
-  const jwks = createRemoteJWKSet(new URL(idp.jwksUrl), { [customFetch]: safeFetch });
-  await jwtVerify(token, jwks, { issuer: idp.issuer, audience: idp.audience });
+  let jwks = externalJwks.get(idp.jwksUrl);
+  if (!jwks) {
+    jwks = createRemoteJWKSet(new URL(idp.jwksUrl), { [customFetch]: safeFetch });
+    externalJwks.set(idp.jwksUrl, jwks);
+  }
+  const iap = idp.issuer === 'https://cloud.google.com/iap';
+  if (
+    iap &&
+    !(typeof idp.audience === 'string'
+      ? idp.audience.length > 0
+      : Array.isArray(idp.audience) &&
+        idp.audience.length > 0 &&
+        idp.audience.every((value) => typeof value === 'string' && value.length > 0))
+  ) {
+    throw new OperationOutcomeError(badRequest('Missing IAP audience'));
+  }
+  const { payload } = await jwtVerify(token, jwks, {
+    issuer: idp.issuer,
+    audience: idp.audience,
+    // IAP signed-header lifetime and clock-skew rules: https://cloud.google.com/iap/docs/signed-headers-howto
+    ...(iap ? { maxTokenAge: '10m', clockTolerance: 30, algorithms: ['ES256'] } : {}),
+  });
+  if (
+    iap &&
+    (typeof payload.iat !== 'number' ||
+      typeof payload.exp !== 'number' ||
+      payload.exp < payload.iat ||
+      payload.exp - payload.iat > 660)
+  ) {
+    throw new OperationOutcomeError(badRequest('Invalid IAP token lifetime'));
+  }
+  return payload;
 }
 
 interface ValidationAssertion {
@@ -1423,7 +1458,7 @@ async function tryExternalAuth(
     (provider) => (provider.identityProvider?.issuer ?? provider.issuer) === issuer
   );
   let client: WithId<ClientApplication> | undefined;
-  let idp: IdentityProvider | undefined;
+  let idp: ExternalIdentityProvider | undefined;
   if (externalAuthConfig?.identityProvider) {
     idp = { issuer, userInfoUrl: externalAuthConfig.userInfoUrl, ...externalAuthConfig.identityProvider };
   } else if (externalAuthConfig?.userInfoUrl) {
@@ -1446,10 +1481,25 @@ async function tryExternalAuth(
   let membership: WithId<ProjectMembership> | undefined;
 
   if (cachedValue) {
-    // Use cached login if available
-    login = JSON.parse(cachedValue) as Login;
-    membership = await systemRepo.readReference<ProjectMembership>(login.membership as Reference<ProjectMembership>);
-    project = await systemRepo.readReference<Project>(membership.project);
+    // A cached identity must not outlive its external token or a revoked login.
+    try {
+      await verifyExternalToken(idp, accessToken);
+      const cachedLogin = JSON.parse(cachedValue) as Login;
+      if (!cachedLogin.id) {
+        return undefined;
+      }
+      login = await systemRepo.readResource<Login>('Login', cachedLogin.id);
+      if (!login.membership || login.revoked) {
+        return undefined;
+      }
+      membership = await systemRepo.readReference<ProjectMembership>(login.membership);
+      project = await systemRepo.readReference<Project>(membership.project);
+      if (getInactiveReason(project, membership)) {
+        return undefined;
+      }
+    } catch {
+      return undefined;
+    }
   } else {
     // If not cached, try to authenticate the user with the external auth provider
     const externalAuthState = await tryExternalAuthLogin(systemRepo, req, accessToken, claims, idp, client);
@@ -1468,7 +1518,7 @@ async function tryExternalAuthLogin(
   req: Request | undefined,
   accessToken: string,
   claims: JWTPayload & { iss: string },
-  idp: IdentityProvider,
+  idp: ExternalIdentityProvider,
   client: WithId<ClientApplication> | undefined
 ): Promise<Pick<AuthState, 'login' | 'project' | 'membership'> | undefined> {
   const extensions = claims.ext as Record<string, unknown> | undefined;
