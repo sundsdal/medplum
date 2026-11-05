@@ -680,7 +680,7 @@ async function tryGetExternalUserInfo(
   idp: ExternalIdentityProvider,
   subjectToken: string
 ): Promise<JWTPayload | undefined> {
-  if (!idp.jwksUrl && !idp.userInfoUrl) {
+  if (!idp.userInfoUrl && (!idp.jwksUrl || !idp.useSubject)) {
     sendTokenError(res, 'invalid_request', 'Missing user info URL', 400);
     return undefined;
   }
@@ -719,12 +719,16 @@ function resolveExternalAuthProvider(
   );
   if (externalAuthConfig) {
     if (externalAuthConfig.identityProvider) {
-      return externalAuthConfig.identityProvider;
+      return {
+        issuer: externalAuthConfig.issuer,
+        userInfoUrl: externalAuthConfig.userInfoUrl,
+        ...externalAuthConfig.identityProvider,
+      };
     }
 
     const userInfoUrl = externalAuthConfig.userInfoUrl;
     if (userInfoUrl) {
-      return { userInfoUrl };
+      return { issuer: externalAuthConfig.issuer, userInfoUrl };
     }
   }
 

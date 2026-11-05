@@ -2279,6 +2279,7 @@ describe('OAuth2 Token', () => {
       redirectUri,
       identityProvider: {
         issuer: externalAuthIssuer,
+        jwksUrl: 'https://example.com/.well-known/jwks.json',
       },
     });
 
@@ -2328,7 +2329,6 @@ describe('OAuth2 Token', () => {
           issuer: externalAuthIssuer,
           clientId: externalAuthConfigClientId,
           identityProvider: {
-            issuer: externalAuthIssuer,
             jwksUrl: 'https://example.com/jwks',
             useSubject: true,
             audience: ['app-audience', 'provider-audience'],
