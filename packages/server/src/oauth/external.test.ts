@@ -1,12 +1,11 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
 import type { ProfileResource, WithId } from '@medplum/core';
-import { encodeBase64Url, getReferenceString, parseSearchRequest } from '@medplum/core';
-import type { Login, Practitioner, Project, ProjectMembership } from '@medplum/fhirtypes';
+import { encodeBase64Url, getReferenceString } from '@medplum/core';
+import type { Practitioner, Project, ProjectMembership } from '@medplum/fhirtypes';
 import { randomUUID } from 'crypto';
 import express from 'express';
 import { exportJWK, generateKeyPair, SignJWT } from 'jose';
-import assert from 'node:assert/strict';
 import request from 'supertest';
 import { vi } from 'vitest';
 import { inviteUser } from '../admin/invite';
@@ -14,7 +13,7 @@ import { initApp, shutdownApp } from '../app';
 import { getConfig, loadTestConfig } from '../config/loader';
 import type { MedplumExternalAuthConfig } from '../config/types';
 import type { SystemRepository } from '../fhir/repo';
-import { getGlobalSystemRepo, getProjectSystemRepo } from '../fhir/repo';
+import { getProjectSystemRepo } from '../fhir/repo';
 import { addTestUser, createTestProject } from '../test.setup';
 import { mockFetchJson } from '../test.setup.fetch';
 import { verifyExternalToken } from './utils';
@@ -330,7 +329,7 @@ describe('External auth', () => {
   });
 
   test('Success by reference', async () => {
-    fetchMock.mockImplementationOnce(() => mockFetchJson({ ok: true }));
+    fetchMock.mockImplementation(() => mockFetchJson({ ok: true }));
 
     const jwt = createFakeJwt({
       iss: 'https://external-auth.example.com',
@@ -639,12 +638,11 @@ describe('External auth', () => {
         .get('/oauth2/userinfo')
         .set('Authorization', 'Bearer ' + token);
     expect(await send()).toHaveStatus(200);
-    const globalRepo = getGlobalSystemRepo();
-    const login = await globalRepo.searchOne<Login>(
-      parseSearchRequest(`Login?membership=ProjectMembership/${membership.id}`)
-    );
-    assert(login);
-    await globalRepo.updateResource<Login>({ ...login, revoked: true });
+    expect(
+      await request(app)
+        .post('/oauth2/logout')
+        .set('Authorization', 'Bearer ' + token)
+    ).toHaveStatus(200);
     expect(await send()).toHaveStatus(401);
 
     // A different authenticated session also stops immediately when its membership is disabled.
