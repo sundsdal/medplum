@@ -17,6 +17,7 @@ permissions:
 jobs:
   build:
     name: Build
+    if: github.repository == 'medplum/medplum'
     runs-on: medplum-build-16core
     timeout-minutes: 45
     permissions:
@@ -742,6 +743,7 @@ jobs:
 
   build-docs:
     name: Build the docs
+    if: github.repository == 'medplum/medplum'
     runs-on: medplum-build-16core
     timeout-minutes: 30
     permissions:
