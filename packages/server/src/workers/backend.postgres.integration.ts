@@ -22,7 +22,7 @@ integration('PostgreSQL background jobs', () => {
   const config = {
     backgroundJobs: {
       backend: 'postgres',
-      postgres: { connectionString: connectionString as string, maxConnections: 8 },
+      postgres: { connectionString: connectionString as string, maxConnections: 4 },
     },
   } as unknown as ServerConfig;
   let queue: InstanceType<typeof Queue>;
@@ -40,7 +40,7 @@ integration('PostgreSQL background jobs', () => {
 
   beforeEach(async () => {
     workers = [];
-    await initQueueBackend(config, 2);
+    await initQueueBackend(config);
     queue = new Queue(`integration-${randomUUID()}`, { connection: getQueueBackendOptions(config) });
     await queue.waitUntilReady();
   });
@@ -67,7 +67,7 @@ integration('PostgreSQL background jobs', () => {
     await closeQueueBackend();
     expect(await testQueueBackend(config)).toBe(false);
 
-    await initQueueBackend(config, 2);
+    await initQueueBackend(config);
     queue = new Queue(queue.name, { connection: getQueueBackendOptions(config) });
     const seen: unknown[] = [];
     workers.push(
@@ -85,6 +85,67 @@ integration('PostgreSQL background jobs', () => {
     expect(seen).toEqual([{ value: 42 }]);
   });
 
+  test('shares one listener across eleven workers, recovers its loss and closes promptly', async () => {
+    const pool = getQueueBackendOptions(config) as Pool;
+    const queues = Array.from({ length: 11 }, () => new Queue(`bounded-${randomUUID()}`, { connection: pool }));
+    const seen = new Set<number>();
+    const active = queues.map(
+      (item) =>
+        new Worker(
+          item.name,
+          async (job) => {
+            seen.add(job.data.value);
+          },
+          { connection: pool }
+        )
+    );
+    try {
+      await Promise.all(active.map((worker) => worker.waitUntilReady()));
+      await Promise.all(queues.map((item, value) => item.add('before', { value })));
+      await waitFor(() => seen.size === 11);
+      expect(pool.totalCount).toBeLessThanOrEqual(4);
+      expect(await testQueueBackend(config)).toBe(true);
+      const terminated = await pool.query(
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = 'medplum-background-jobs' AND pid <> pg_backend_pid()"
+      );
+      expect(terminated.rowCount).toBe(1);
+      await Promise.all(queues.map((item, value) => item.add('after', { value: value + 11 })));
+      await waitFor(() => seen.size === 22);
+      expect(pool.totalCount).toBeLessThanOrEqual(4);
+      expect(await testQueueBackend(config)).toBe(true);
+      await Promise.race([
+        Promise.all(active.map((worker) => worker.close())),
+        delay(5000).then(() => {
+          throw new Error('Worker close timed out');
+        }),
+      ]);
+    } finally {
+      await Promise.all(active.map((worker) => worker.close()));
+      await Promise.all(
+        queues.map(async (item) => {
+          await item.obliterate({ force: true });
+          await item.close();
+        })
+      );
+    }
+  });
+
+  test('initializes the real registered Medplum workers on four connections', async () => {
+    await queue.close();
+    await closeQueueBackend();
+    const { initWorkers, closeWorkers } = await import('./index');
+    try {
+      await initWorkers(config);
+      const activePool = getQueueBackendOptions(config) as Pool;
+      expect(await testQueueBackend(config)).toBe(true);
+      expect(activePool.totalCount).toBeLessThanOrEqual(4);
+    } finally {
+      await closeWorkers();
+      await initQueueBackend(config);
+      queue = new Queue(queue.name, { connection: getQueueBackendOptions(config) });
+    }
+  });
+
   test('preserves URL options while forcing the queue schema', async () => {
     await queue.close();
     await closeQueueBackend();
@@ -94,9 +155,9 @@ integration('PostgreSQL background jobs', () => {
       '-c search_path=public -c statement_timeout=12345 -c default_transaction_isolation=repeatable\\ read'
     );
     const optionsConfig = {
-      backgroundJobs: { backend: 'postgres', postgres: { connectionString: url.toString(), maxConnections: 8 } },
+      backgroundJobs: { backend: 'postgres', postgres: { connectionString: url.toString(), maxConnections: 4 } },
     } as unknown as ServerConfig;
-    await initQueueBackend(optionsConfig, 2);
+    await initQueueBackend(optionsConfig);
     queue = new Queue(queue.name, { connection: getQueueBackendOptions(optionsConfig) });
     const pool = getQueueBackendOptions(optionsConfig) as Pool;
     const result = await pool.query(
@@ -126,7 +187,7 @@ integration('PostgreSQL background jobs', () => {
     const pool = getQueueBackendOptions(config) as Pool;
     const clients = [];
     try {
-      for (let i = 0; i < 7; i++) {
+      for (let i = 0; i < 2; i++) {
         clients.push(await pool.connect());
       }
       expect(await testQueueBackend(config)).toBe(true);
@@ -243,7 +304,7 @@ integration('PostgreSQL background jobs', () => {
     workers = [];
     await queue.close();
     await closeQueueBackend();
-    await initQueueBackend(config, 2);
+    await initQueueBackend(config);
     queue = new Queue(queue.name, { connection: getQueueBackendOptions(config) });
     const counts = await queue.getJobCounts('completed', 'failed');
     expect(counts.completed).toBe(1);
@@ -317,7 +378,7 @@ integration('Medplum worker registration', () => {
     const config = {
       backgroundJobs: {
         backend: 'postgres',
-        postgres: { connectionString: connectionString as string, maxConnections: 8 },
+        postgres: { connectionString: connectionString as string, maxConnections: 4 },
       },
       workers: { enabled: [] },
     } as unknown as ServerConfig;
@@ -369,7 +430,7 @@ redisIntegration('default Redis background jobs', () => {
       },
     } as ServerConfig;
     const name = `integration-${randomUUID()}`;
-    await initQueueBackend(config, 1);
+    await initQueueBackend(config);
     const queue = new Queue(name, { connection: getQueueBackendOptions(config) });
     const seen: unknown[] = [];
     const worker = new Worker(
