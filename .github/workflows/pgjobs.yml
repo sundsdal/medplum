@@ -45,3 +45,72 @@ jobs:
         run: npx eslint packages/server/src/workers/backend*.ts packages/server/src/workers/shared-postgres-backend.ts packages/server/src/workers/index.ts packages/server/src/config/background-jobs.ts packages/server/src/config/loader.ts
       - name: Check formatting
         run: npx prettier --check .github/workflows/pgjobs.yml .github/workflows/build.yml .github/workflows/add-issue-to-project.yml packages/server/src/workers/backend*.ts packages/server/src/workers/shared-postgres-backend.ts packages/server/src/workers/index.ts packages/server/src/config/background-jobs.ts packages/server/src/config/loader.ts packages/docs/docs/self-hosting/background-jobs.md
+  auth-verify:
+    env:
+      MEDPLUM_TEST_REDIS_DB: '0'
+      MEDPLUM_WORKERS_ENABLED: '[]'
+      MEDPLUM_TEST_QUEUE_DATABASE_URL: postgres://medplum:medplum@localhost:5432/medplum_test
+    if: github.repository == 'sundsdal/medplum'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: synthetic-ci-only
+        ports: [5432:5432]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: sundsdal/postkeys
+          ref: 07a1b3de847f4fdfb9a234d830091664a0da2773
+          path: postkeys-ci
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: postkeys-ci/go.mod
+      - run: npm ci
+      - name: Build server and dependencies
+        run: npx turbo run build --filter=@medplum/server...
+      - name: Create isolated test databases and roles
+        env:
+          PGPASSWORD: synthetic-ci-only
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -c "CREATE ROLE medplum LOGIN SUPERUSER PASSWORD 'medplum'"
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE postkeys_ci OWNER medplum"
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -f postgres/init_test.sql
+      - name: Start PostgreSQL-backed Postkeys for the auth test harness
+        working-directory: postkeys-ci
+        env:
+          PG_HOST: localhost
+          PG_USER: medplum
+          PG_PASSWORD: medplum
+          PG_DATABASE: postkeys_ci
+          REDIS_PASSWORD: medplum
+        run: |
+          go build -o "$RUNNER_TEMP/postkeys" ./cmd/server
+          "$RUNNER_TEMP/postkeys" > "$RUNNER_TEMP/postkeys.log" 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:9090/health >/dev/null; then exit 0; fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/postkeys.log"
+          exit 1
+      - name: Seed synthetic Medplum test databases
+        working-directory: packages/server
+        run: npx vitest run --config vite.seed.config.ts --testTimeout=400000
+      - name: Verify external authentication and native token exchange
+        working-directory: packages/server
+        run: npx vitest run --no-file-parallelism --maxWorkers=1 src/auth/external.test.ts src/oauth/external.test.ts src/oauth/token.test.ts
+      - name: Lint authentication changes
+        run: npx eslint packages/server/src/config/types.ts packages/server/src/auth/external.ts packages/server/src/oauth/utils.ts packages/server/src/oauth/token.ts packages/server/src/oauth/external.test.ts packages/server/src/oauth/token.test.ts

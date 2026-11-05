@@ -11,7 +11,8 @@ import { loadGcpConfig } from '../cloud/gcp/config';
 import { isReservedShardId, isValidShardId } from '../fhir/sharding';
 import { globalLogger } from '../logger';
 import { DEFAULT_POSTGRES_QUEUE_CONNECTIONS, getEnabledWorkerNames, validatePostgresPoolSize } from './background-jobs';
-import type { MedplumServerConfig } from './types';
+import type { MedplumServerConfig, WorkerName } from './types';
+import { WORKER_NAMES } from './types';
 import type { ServerConfig } from './utils';
 import {
   addDefaults,
@@ -243,19 +244,40 @@ export async function loadTestConfig(opts?: { sharded?: boolean }): Promise<Serv
     username: 'medplum_test_readonly',
     password: 'medplum_test_readonly',
   };
-  config.redis.db = 7; // Select logical DB `7` so we don't collide with existing dev Redis cache.
+  // Postkeys supports DB 0 only; isolated test instances can opt in without changing defaults.
+  const testRedisDb = process.env['MEDPLUM_TEST_REDIS_DB'];
+  if (testRedisDb !== undefined && !/^\d+$/.test(testRedisDb)) {
+    throw new Error('MEDPLUM_TEST_REDIS_DB must be a nonnegative integer');
+  }
+  const redisDb = testRedisDb === undefined ? undefined : Number(testRedisDb);
+  const testWorkers = process.env['MEDPLUM_WORKERS_ENABLED'];
+  if (testWorkers !== undefined) {
+    const enabled: unknown = JSON.parse(testWorkers);
+    if (
+      !Array.isArray(enabled) ||
+      !enabled.every((name): name is WorkerName | '*' => name === '*' || WORKER_NAMES.includes(name))
+    ) {
+      throw new Error('MEDPLUM_WORKERS_ENABLED must be an array of worker names');
+    }
+    config.workers = { ...config.workers, enabled };
+  }
+  const testQueueUrl = process.env['MEDPLUM_TEST_QUEUE_DATABASE_URL'];
+  if (testQueueUrl) {
+    config.backgroundJobs = { backend: 'postgres', postgres: { connectionString: testQueueUrl, maxConnections: 4 } };
+  }
+  config.redis.db = redisDb ?? 7; // Separate the default test cache from local development.
   // leave cacheRedis on the default DB
   config.rateLimitRedis = {
     ...config.redis,
-    db: 8,
+    db: redisDb ?? 8,
   };
   config.pubSubRedis = {
     ...config.redis,
-    db: 9,
+    db: redisDb ?? 9,
   };
   config.backgroundJobsRedis = {
     ...config.redis,
-    db: 10,
+    db: redisDb ?? 10,
   };
   config.approvedSenderEmails = 'no-reply@example.com';
   config.emailProvider = 'none';
