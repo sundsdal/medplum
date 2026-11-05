@@ -12,11 +12,12 @@ import {
   parseJWTPayload,
   resolveId,
 } from '@medplum/core';
-import type { ClientApplication, DomainConfiguration, IdentityProvider, Project, User } from '@medplum/fhirtypes';
+import type { ClientApplication, DomainConfiguration, Project, User } from '@medplum/fhirtypes';
 import type { Request, Response } from 'express';
 import { createRemoteJWKSet, customFetch, jwtVerify } from 'jose';
 import { randomUUID } from 'node:crypto';
 import { getConfig } from '../config/loader';
+import type { ExternalIdentityProvider } from '../config/types';
 import { sendOutcome } from '../fhir/outcomes';
 import { getGlobalSystemRepo } from '../fhir/repo';
 import { getLogger, globalLogger } from '../logger';
@@ -45,8 +46,8 @@ export interface ExternalAuthState {
   returnTo?: string;
 }
 
-type IdentitySource = NonNullable<IdentityProvider['identitySource']>;
-type IdentityMappingMode = NonNullable<IdentityProvider['identityMappingMode']>;
+type IdentitySource = NonNullable<ExternalIdentityProvider['identitySource']>;
+type IdentityMappingMode = NonNullable<ExternalIdentityProvider['identityMappingMode']>;
 
 export interface ExternalLoginIdentity {
   email?: string;
@@ -225,8 +226,8 @@ async function getIdentityProvider(
   state: ExternalAuthState,
   domainConfig: DomainConfiguration | undefined,
   callbackClientId: string | undefined
-): Promise<{ idp?: IdentityProvider; client?: ClientApplication }> {
-  let idp: IdentityProvider | undefined;
+): Promise<{ idp?: ExternalIdentityProvider; client?: ClientApplication }> {
+  let idp: ExternalIdentityProvider | undefined;
   let client: ClientApplication | undefined;
 
   if (callbackClientId !== undefined) {
@@ -272,7 +273,7 @@ async function getIdentityProvider(
  * @returns The email or external ID to log in with.
  */
 export async function resolveExternalLoginIdentity(
-  idp: IdentityProvider,
+  idp: ExternalIdentityProvider,
   userInfo: Record<string, unknown>
 ): Promise<ExternalLoginIdentity> {
   const identitySource = getIdentitySource(idp);
@@ -303,12 +304,12 @@ export async function resolveExternalLoginIdentity(
   throw new OperationOutcomeError(badRequest('Unsupported identity provider configuration'));
 }
 
-function getIdentitySource(idp: IdentityProvider): IdentitySource {
+function getIdentitySource(idp: ExternalIdentityProvider): IdentitySource {
   // Fallback to preserve legacy behavior
   return idp.identitySource ?? (idp.useSubject ? 'subject' : 'email');
 }
 
-function getIdentityMappingMode(idp: IdentityProvider): IdentityMappingMode {
+function getIdentityMappingMode(idp: ExternalIdentityProvider): IdentityMappingMode {
   // Fallback to preserve legacy behavior
   return idp.identityMappingMode ?? (idp.useSubject ? 'project-membership-external-id' : 'user-email');
 }
@@ -322,7 +323,7 @@ function getIdentityMappingMode(idp: IdentityProvider): IdentityMappingMode {
  * @returns ID token claims.
  */
 async function verifyExternalCode(
-  idp: IdentityProvider,
+  idp: ExternalIdentityProvider,
   code: string,
   codeVerifier: string | undefined,
   callbackClientId: string | undefined
@@ -401,7 +402,10 @@ async function verifyExternalCode(
  * @param idToken - The raw id_token from the token endpoint response.
  * @returns The id_token claims.
  */
-async function verifyExternalIdToken(idp: IdentityProvider, idToken: unknown): Promise<Record<string, unknown>> {
+async function verifyExternalIdToken(
+  idp: ExternalIdentityProvider,
+  idToken: unknown
+): Promise<Record<string, unknown>> {
   if (!isString(idToken)) {
     throw new OperationOutcomeError(badRequest('Missing id_token in external identity provider response'));
   }
