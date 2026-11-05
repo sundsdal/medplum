@@ -201,8 +201,8 @@ describe('OpenTelemetry', () => {
 
   test('initOtelHeartbeat throws without registering a listener when a queue is missing', () => {
     const heartbeatAddListenerSpy = vi.spyOn(heartbeat, 'addEventListener');
-    vi.spyOn(batchModule, 'getBatchQueue').mockReturnValue(undefined as never);
-    vi.spyOn(setAccountsModule, 'getSetAccountsQueue').mockReturnValue(undefined as never);
+    vi.spyOn(batchModule, 'getBatchQueue').mockReturnValue(undefined);
+    vi.spyOn(setAccountsModule, 'getSetAccountsQueue').mockReturnValue(undefined);
 
     expect(() => initOtelHeartbeat()).toThrow('Queues not initialized: batch, set-accounts');
     expect(heartbeatAddListenerSpy).not.toHaveBeenCalled();
@@ -265,7 +265,7 @@ describe('OpenTelemetry', () => {
     );
 
     initOtelHeartbeat();
-    vi.spyOn(batchModule, 'getBatchQueue').mockReturnValue(undefined as never);
+    vi.spyOn(batchModule, 'getBatchQueue').mockReturnValue(undefined);
     heartbeat.dispatchEvent({ type: 'heartbeat' });
     await sleep(0);
 

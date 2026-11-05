@@ -163,6 +163,7 @@ const integerKeys = new Set([
   'idleInTransactionLogThresholdMs',
   'fhirSearchMinLimit',
 
+  'backgroundJobs.postgres.maxConnections',
   'database.maxConnections',
   'database.minConnections',
   'database.maxConnectionUses',
@@ -247,6 +248,8 @@ export function isBooleanConfig(key: string): boolean {
 }
 
 const objectKeys = new Set([
+  'backgroundJobs',
+  'backgroundJobs.postgres',
   'capabilityStatement',
   'tls',
   'ssl',
@@ -306,7 +309,7 @@ export function setValue(config: Record<string, unknown>, key: string, value: st
 
   let parsedValue: unknown = value;
   if (isIntegerConfig(typeKey)) {
-    parsedValue = Number.parseInt(value, 10);
+    parsedValue = typeKey === 'backgroundJobs.postgres.maxConnections' ? Number(value) : Number.parseInt(value, 10);
   } else if (isBooleanConfig(typeKey)) {
     parsedValue = value === 'true';
   } else if (isObjectConfig(typeKey)) {

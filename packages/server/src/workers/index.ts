@@ -2,9 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { BackgroundJobContext, WithId } from '@medplum/core';
 import type { Resource } from '@medplum/fhirtypes';
+import { getEnabledWorkerNames } from '../config/background-jobs';
 import type { WorkerName } from '../config/types';
+import { WORKER_NAMES } from '../config/types';
 import type { ServerConfig } from '../config/utils';
 import { getLogger, globalLogger } from '../logger';
+import { closeQueueBackend, initQueueBackend } from './backend';
 import { initBatchWorker } from './batch';
 import { initBulkExportWorker } from './bulk-export';
 import { initCronWorker } from './cron';
@@ -19,19 +22,19 @@ import { initSubscriptionWorker } from './subscription';
 import type { WorkerInitializer } from './utils';
 import { applyGlobalConcurrency, getMedplumBullmqConfig, queueRegistry } from './utils';
 
-const workerDefs: { name: WorkerName; init: WorkerInitializer }[] = [
-  { name: 'dispatch', init: initDispatchWorker },
-  { name: 'subscription', init: initSubscriptionWorker },
-  { name: 'download', init: initDownloadWorker },
-  { name: 'cron', init: initCronWorker },
-  { name: 'reindex', init: initReindexWorker },
-  { name: 'batch', init: initBatchWorker },
-  { name: 'bulk-export', init: initBulkExportWorker },
-  { name: 'post-deploy-migration', init: initPostDeployMigrationWorker },
-  { name: 'set-accounts', init: initSetAccountsWorker },
-  { name: 'lambda-cleaner', init: initLambdaCleanerWorker },
-  { name: 'dicom', init: initDicomWorker },
-];
+const workerDefs: Record<WorkerName, WorkerInitializer> = {
+  dispatch: initDispatchWorker,
+  subscription: initSubscriptionWorker,
+  download: initDownloadWorker,
+  cron: initCronWorker,
+  reindex: initReindexWorker,
+  batch: initBatchWorker,
+  'bulk-export': initBulkExportWorker,
+  'post-deploy-migration': initPostDeployMigrationWorker,
+  'set-accounts': initSetAccountsWorker,
+  'lambda-cleaner': initLambdaCleanerWorker,
+  dicom: initDicomWorker,
+};
 
 /**
  * Initializes all background workers.
@@ -39,19 +42,28 @@ const workerDefs: { name: WorkerName; init: WorkerInitializer }[] = [
  */
 export async function initWorkers(config: ServerConfig): Promise<void> {
   globalLogger.debug('Initializing workers...');
-  const enabledWorkers = config.workers?.enabled;
-  const enableAll = config.workers?.enabled?.includes('*');
-
-  for (const { name, init } of workerDefs) {
-    const workerEnabled = enableAll || enabledWorkers === undefined || enabledWorkers.includes(name);
-    const { name: queueName, queue, worker } = init(config, { workerEnabled });
-    // a queue can be disabled, in which case, don't register it
-    if (queue) {
-      queueRegistry.add(queueName, queue, worker);
-      // Fail startup if the global concurrency limit cannot be applied: it is unsafe to run the
-      // workers without it configured correctly.
-      await applyGlobalConcurrency(queue, getMedplumBullmqConfig(config, name));
+  const enabledWorkers = new Set(getEnabledWorkerNames(config));
+  await initQueueBackend(config, enabledWorkers.size);
+  try {
+    for (const name of WORKER_NAMES) {
+      const init = workerDefs[name];
+      const workerEnabled = enabledWorkers.has(name);
+      const { name: queueName, queue, worker } = init(config, { workerEnabled });
+      // a queue can be disabled, in which case, don't register it
+      if (queue) {
+        queueRegistry.add(queueName, queue, worker);
+        // Fail startup if the global concurrency limit cannot be applied: it is unsafe to run the
+        // workers without it configured correctly.
+        await applyGlobalConcurrency(queue, getMedplumBullmqConfig(config, name));
+      }
     }
+  } catch (err) {
+    try {
+      await closeWorkers();
+    } catch (cleanupError) {
+      globalLogger.error('Error cleaning up background jobs after startup failure', { err: cleanupError });
+    }
+    throw err;
   }
   globalLogger.debug('Workers initialized');
 }
@@ -60,7 +72,20 @@ export async function initWorkers(config: ServerConfig): Promise<void> {
  * Shuts down all background workers.
  */
 export async function closeWorkers(): Promise<void> {
-  await queueRegistry.closeAll();
+  const errors: unknown[] = [];
+  try {
+    await queueRegistry.closeAll();
+  } catch (err) {
+    errors.push(err);
+  }
+  try {
+    await closeQueueBackend();
+  } catch (err) {
+    errors.push(err);
+  }
+  if (errors.length) {
+    throw new AggregateError(errors, 'Failed to close background jobs');
+  }
 }
 
 /**

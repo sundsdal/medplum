@@ -53,6 +53,9 @@ export interface MedplumServerConfig {
    * Separating background job queues from other purposes can improve performance under high load by isolating job queue operations.
    */
   backgroundJobsRedis?: MedplumRedisConfig;
+  /** Queue storage. Redis is used when omitted and recommended for production. PostgreSQL is experimental and requires a dedicated connection string. */
+  backgroundJobs?:
+    { backend: 'redis' } | { backend: 'postgres'; postgres: { connectionString: string; maxConnections?: number } };
   shards?: Record<string, MedplumShardConfig>;
   emailProvider?: 'none' | 'awsses' | 'smtp';
   smtp?: MedplumSmtpConfig;
@@ -420,18 +423,21 @@ export interface MedplumExternalAuthConfig {
   readonly identityProvider?: IdentityProvider;
 }
 
-export type WorkerName =
-  | 'dispatch'
-  | 'subscription'
-  | 'download'
-  | 'cron'
-  | 'reindex'
-  | 'batch'
-  | 'bulk-export'
-  | 'post-deploy-migration'
-  | 'set-accounts'
-  | 'lambda-cleaner'
-  | 'dicom';
+export const WORKER_NAMES = [
+  'dispatch',
+  'subscription',
+  'download',
+  'cron',
+  'reindex',
+  'batch',
+  'bulk-export',
+  'post-deploy-migration',
+  'set-accounts',
+  'lambda-cleaner',
+  'dicom',
+] as const;
+
+export type WorkerName = (typeof WORKER_NAMES)[number];
 
 export interface MedplumWorkersConfig {
   /**

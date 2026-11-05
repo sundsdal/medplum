@@ -10,6 +10,7 @@ import { loadAzureConfig } from '../cloud/azure/config';
 import { loadGcpConfig } from '../cloud/gcp/config';
 import { isReservedShardId, isValidShardId } from '../fhir/sharding';
 import { globalLogger } from '../logger';
+import { DEFAULT_POSTGRES_QUEUE_CONNECTIONS, getEnabledWorkerNames, validatePostgresPoolSize } from './background-jobs';
 import type { MedplumServerConfig } from './types';
 import type { ServerConfig } from './utils';
 import {
@@ -78,8 +79,37 @@ export async function loadConfig(configName: string): Promise<ServerConfig> {
   }
 
   validateShardingConfig(config);
+  validateBackgroundJobsConfig(config);
   cachedConfig = addDefaults(config);
   return cachedConfig;
+}
+
+/**
+ * Validates queue storage settings from untyped configuration sources.
+ * @param config - The merged server configuration.
+ */
+function validateBackgroundJobsConfig(config: MedplumServerConfig): void {
+  const jobs: unknown = config.backgroundJobs;
+  if (jobs === undefined) {
+    return;
+  }
+  if (!isObject(jobs) || (jobs.backend !== 'redis' && jobs.backend !== 'postgres')) {
+    throw new Error('Invalid backgroundJobs config: backend must be redis or postgres');
+  }
+  if (jobs.backend === 'postgres') {
+    if (
+      !isObject(jobs.postgres) ||
+      typeof jobs.postgres.connectionString !== 'string' ||
+      !jobs.postgres.connectionString.trim()
+    ) {
+      throw new Error('Invalid backgroundJobs config: postgres.connectionString is required');
+    }
+    const max = jobs.postgres.maxConnections;
+    if (max !== undefined && typeof max !== 'number') {
+      throw new Error('backgroundJobs.postgres.maxConnections must be an integer');
+    }
+    validatePostgresPoolSize(max ?? DEFAULT_POSTGRES_QUEUE_CONNECTIONS, getEnabledWorkerNames(config).length);
+  }
 }
 
 /**
