@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
 import type { BotResponseStream } from '@medplum/core';
-import { badRequest, OperationOutcomeError, resolveId } from '@medplum/core';
+import { badRequest, Hl7Message, OperationOutcomeError, resolveId } from '@medplum/core';
 import type { Bot, Login, Project, ProjectMembership } from '@medplum/fhirtypes';
 import type { Job } from 'bullmq';
 import bytes from 'bytes';
@@ -52,13 +52,14 @@ export async function queueBotExecution(
   if (!bot.id || !ctx.login.id || ctx.authState.onBehalfOfMembership || ctx.authState.onBehalfOf) {
     throw new OperationOutcomeError(badRequest('Queued bot execution requires a native login without delegation'));
   }
-  checkSize(input);
+  const queuedInput = input instanceof Hl7Message ? input.toString() : input;
+  checkSize(queuedInput);
   const data: QueuedBotJobData = {
     botId: bot.id,
     projectId: ctx.project.id,
     membershipId: ctx.membership.id,
     loginId: ctx.login.id,
-    input,
+    input: queuedInput,
     contentType,
     deadline: Date.now() + DEADLINE_MS,
     streaming: !!responseStream,

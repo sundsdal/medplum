@@ -1,6 +1,6 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
-import { createReference, parseJWTPayload } from '@medplum/core';
+import { ContentType, createReference, parseJWTPayload } from '@medplum/core';
 import type { AccessPolicy, Binary, Bot, Login, ProjectMembership } from '@medplum/fhirtypes';
 import express from 'express';
 import request from 'supertest';
@@ -101,6 +101,42 @@ integration('queued bot execution with PostgreSQL', () => {
       expect(await queue.getJob(job.id)).toBeUndefined();
     } finally {
       add.mockRestore();
+    }
+  });
+
+  test('preserves HL7 wire input through the queue', async () => {
+    const repo = await getProjectSystemRepo(projectId);
+    const original = await repo.readResource<Bot>('Bot', botId);
+    const binary = await repo.createResource<Binary>({
+      resourceType: 'Binary',
+      meta: { project: projectId },
+      contentType: 'application/javascript',
+    });
+    await getBinaryStorage().writeBinary(
+      binary,
+      undefined,
+      binary.contentType,
+      'exports.handler = async function (_medplum, event) { return event.input; };'
+    );
+    await repo.updateResource({ ...original, executableCode: { url: 'Binary/' + binary.id } });
+    const queue = getDispatchQueue();
+    const add = vi.spyOn(queue, 'add');
+    try {
+      const text =
+        'MSH|^~\\&|Main_HIS|XYZ_HOSPITAL|iFW|ABC_Lab|20160915003015||ACK|9B38584D|P|2.6.1|\r' +
+        'MSA|AA|9B38584D|Everything was okay dokay!|';
+      const response = await request(app)
+        .post(`/fhir/R4/Bot/${botId}/$execute`)
+        .set('Authorization', `Bearer ${token}`)
+        .set('Content-Type', ContentType.HL7_V2)
+        .send(text);
+      expect(response.status).toBe(200);
+      expect(response.text).toBe(text);
+      const call = add.mock.calls.find(([name]) => name === queuedBotJobName);
+      expect(call?.[1]).toEqual(expect.objectContaining({ input: text }));
+    } finally {
+      add.mockRestore();
+      await repo.updateResource(original);
     }
   });
 
