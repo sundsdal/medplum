@@ -76,6 +76,10 @@ export interface MedplumServerConfig {
   botLambdaLayerName: string;
   /** Write each bot invocation's input to binary storage (e.g. S3) for debugging and analytics. Default is `true`. */
   storeBotInput?: boolean;
+  /** Explicit Bot IDs whose HTTP executions use the dispatch queue. */
+  queuedBotIds?: string[];
+  /** Enforce ownership and topic integrity for Spaces conversations. Default is false. */
+  spacesOwnedConversationsEnabled?: boolean;
   logRequests?: boolean;
   logAuditEvents?: boolean;
   saveAuditEvents?: boolean;
@@ -85,6 +89,8 @@ export interface MedplumServerConfig {
   bcryptHashSalt: number;
   introspectionEnabled?: boolean;
   keepAliveTimeout?: number;
+  /** Use Vertex AI with Application Default Credentials for $ai. Models must be explicitly allowed. */
+  vertexAi?: { projectId: string; location: string; allowedModels: string[] };
   vmContextBotsEnabled?: boolean;
   vmContextBaseUrl?: string;
   shutdownTimeoutMilliseconds?: number;

@@ -8,6 +8,7 @@ import {
   DEFAULT_REASONING_EFFORT,
   REASONING_EFFORTS,
   getDefaultModel,
+  getModelReasoningEfforts,
   getProjectModels,
 } from './spaceModels';
 
@@ -78,6 +79,24 @@ describe('getDefaultModel', () => {
 });
 
 describe('REASONING_EFFORTS', () => {
+  test('uses configured model capabilities for Gemini without changing legacy model options', () => {
+    const [model] = getProjectModels(
+      mockMedplum([
+        {
+          name: 'aiModels',
+          valueString: JSON.stringify([
+            {
+              value: 'google/gemini-3.8-flash',
+              label: 'Gemini 3.8 Flash',
+              reasoningEfforts: ['low', 'medium', 'high', 'unsupported'],
+            },
+          ]),
+        },
+      ])
+    );
+    expect(getModelReasoningEfforts(model).map((effort) => effort.value)).toEqual(['low', 'medium', 'high']);
+    expect(getModelReasoningEfforts(DEFAULT_MODELS[0])).toEqual(REASONING_EFFORTS);
+  });
   test('offers low through xhigh in order', () => {
     expect(REASONING_EFFORTS.map((e) => e.value)).toEqual(['low', 'medium', 'high', 'xhigh']);
   });

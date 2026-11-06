@@ -53,7 +53,11 @@ export async function createConversationTopic(
  * @returns The created Communication resource
  */
 export async function saveMessage(medplum: MedplumClient, topicId: string, message: Message): Promise<Communication> {
-  return medplum.createResource(buildMessageCommunication(topicId, message));
+  const profile = await medplum.getProfile();
+  if (!profile?.id) {
+    throw new Error('Profile not found');
+  }
+  return medplum.createResource({ ...buildMessageCommunication(topicId, message), sender: createReference(profile) });
 }
 
 /**

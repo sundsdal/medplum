@@ -238,6 +238,7 @@ const booleanKeys = new Set([
   'vmContextBotsEnabled',
   'heartbeatEnabled',
   'dispatchEnabled',
+  'spacesOwnedConversationsEnabled',
   'subscriptionsEnabled',
   'preCommitSubscriptionsEnabled',
   'rangeSearch',
@@ -248,6 +249,7 @@ export function isBooleanConfig(key: string): boolean {
 }
 
 const objectKeys = new Set([
+  'vertexAi',
   'backgroundJobs',
   'backgroundJobs.postgres',
   'capabilityStatement',
@@ -270,7 +272,7 @@ export function isObjectConfig(key: string): boolean {
   return objectKeys.has(key);
 }
 
-const arrayKeys = new Set(['blockedEmailDomains', 'disableChainedSearch']);
+const arrayKeys = new Set(['blockedEmailDomains', 'disableChainedSearch', 'queuedBotIds']);
 
 export function isArrayConfig(key: string): boolean {
   return arrayKeys.has(key);

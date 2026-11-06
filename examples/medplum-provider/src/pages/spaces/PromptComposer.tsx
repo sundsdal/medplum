@@ -18,7 +18,7 @@ import type { JSX } from 'react';
 import { useEffect, useRef, useState } from 'react';
 import { showErrorNotification } from '../../utils/notifications';
 import type { ReasoningEffort, SpaceModelOption } from '../../utils/spaceModels';
-import { REASONING_EFFORTS } from '../../utils/spaceModels';
+import { getModelReasoningEfforts } from '../../utils/spaceModels';
 import { OpenAILogo } from './OpenAILogo';
 import { PatientPicker } from './PatientPicker';
 import classes from './PromptComposer.module.css';
@@ -185,9 +185,16 @@ export function PromptComposer({
     textareaRef.current?.focus();
   };
 
-  const selectedModelLabel = models.find((m) => m.value === selectedModel)?.label ?? selectedModel;
+  const model = models.find((m) => m.value === selectedModel);
+  const reasoningEfforts = getModelReasoningEfforts(model);
+  useEffect(() => {
+    if (!reasoningEfforts.some((effort) => effort.value === selectedReasoningEffort)) {
+      onReasoningEffortChange(reasoningEfforts[0].value);
+    }
+  }, [reasoningEfforts, selectedReasoningEffort, onReasoningEffortChange]);
+  const selectedModelLabel = model?.label ?? selectedModel;
   const selectedEffortLabel =
-    REASONING_EFFORTS.find((e) => e.value === selectedReasoningEffort)?.label ?? selectedReasoningEffort;
+    reasoningEfforts.find((e) => e.value === selectedReasoningEffort)?.label ?? selectedReasoningEffort;
 
   let inputPlaceholder = 'Ask, search, or make anything...';
   if (mode === 'voice') {
@@ -428,7 +435,7 @@ export function PromptComposer({
                     <Menu.Label style={{ padding: 'calc(var(--mantine-spacing-xs) / 2) var(--mantine-spacing-xs)' }}>
                       Reasoning effort
                     </Menu.Label>
-                    {REASONING_EFFORTS.map((effort) => (
+                    {reasoningEfforts.map((effort) => (
                       <Menu.Item
                         key={effort.value}
                         className={classes.modelMenuItem}

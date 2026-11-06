@@ -94,6 +94,7 @@ describe('spacePersistence', () => {
         expect.objectContaining({
           resourceType: 'Communication',
           status: 'completed',
+          sender: { reference: 'Practitioner/practitioner-123' },
           identifier: [
             {
               system: 'http://medplum.com/ai-message',
@@ -137,6 +138,7 @@ describe('spacePersistence', () => {
 
       expect(createSpy).toHaveBeenCalledWith(
         expect.objectContaining({
+          sender: { reference: 'Practitioner/practitioner-123' },
           payload: [
             {
               contentString: JSON.stringify({
@@ -173,6 +175,14 @@ describe('spacePersistence', () => {
       expect(payload.content).toBeNull();
       expect(payload.role).toBe('tool');
       expect(payload.tool_call_id).toBe('call-1');
+      expect(call.sender).toEqual({ reference: 'Practitioner/practitioner-123' });
+    });
+
+    test('requires a profile', async () => {
+      vi.spyOn(medplum, 'getProfile').mockResolvedValue(undefined);
+      await expect(saveMessage(medplum, 'topic-1', { role: 'user', content: 'Hello' })).rejects.toThrow(
+        'Profile not found'
+      );
     });
   });
 

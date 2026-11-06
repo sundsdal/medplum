@@ -5,6 +5,7 @@ import type { MedplumClient } from '@medplum/core';
 export interface SpaceModelOption {
   value: string;
   label: string;
+  reasoningEfforts?: ReasoningEffort[];
 }
 
 /**
@@ -60,10 +61,19 @@ export function getProjectModels(medplum: MedplumClient): SpaceModelOption[] {
       if (Array.isArray(parsed)) {
         const models = parsed
           .filter(
-            (m): m is { value: string; label?: unknown } =>
+            (m): m is { value: string; label?: unknown; reasoningEfforts?: unknown } =>
               Boolean(m) && typeof m.value === 'string' && m.value.length > 0
           )
-          .map((m) => ({ value: m.value, label: typeof m.label === 'string' && m.label ? m.label : m.value }));
+          .map((m) => {
+            const reasoningEfforts = REASONING_EFFORTS.filter(
+              (effort) => Array.isArray(m.reasoningEfforts) && m.reasoningEfforts.includes(effort.value)
+            ).map((effort) => effort.value);
+            return {
+              value: m.value,
+              label: typeof m.label === 'string' && m.label ? m.label : m.value,
+              ...(reasoningEfforts.length ? { reasoningEfforts } : {}),
+            };
+          });
         if (models.length > 0) {
           return models;
         }
@@ -73,6 +83,17 @@ export function getProjectModels(medplum: MedplumClient): SpaceModelOption[] {
     }
   }
   return DEFAULT_MODELS;
+}
+
+/**
+ * Restricts the reasoning menu through the existing aiModels setting.
+ * @param model - The selected model and its configured capabilities.
+ * @returns The supported reasoning options, or the legacy defaults.
+ */
+export function getModelReasoningEfforts(model: SpaceModelOption | undefined): ReasoningEffortOption[] {
+  return model?.reasoningEfforts
+    ? REASONING_EFFORTS.filter((effort) => model.reasoningEfforts?.includes(effort.value))
+    : REASONING_EFFORTS;
 }
 
 /**

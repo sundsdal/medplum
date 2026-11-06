@@ -13,6 +13,7 @@ import {
 import type { Bot, OperationOutcome } from '@medplum/fhirtypes';
 import type { Request, Response } from 'express';
 import { executeBot } from '../../bots/execute';
+import { queueBotExecution } from '../../bots/queued';
 import type { BotExecutionResult } from '../../bots/types';
 import {
   getBotBodyInput,
@@ -21,6 +22,7 @@ import {
   getOutParametersFromResult,
   sendBotResponse,
 } from '../../bots/utils';
+import { getConfig } from '../../config/loader';
 import { getAuthenticatedContext } from '../../context';
 import { searchUnique } from '../searchunique';
 import { sendAsyncResponse } from './utils/asyncjobexecutor';
@@ -112,6 +114,14 @@ async function executeOperation(req: Request, res: Response): Promise<OperationO
         }
       },
     }) as BotResponseStream;
+  }
+
+  if (getConfig().queuedBotIds?.includes(bot.id)) {
+    if (req.header('Prefer') === 'respond-async') {
+      return badRequest('Queued bot execution does not support respond-async');
+    }
+    const input = req.method === 'POST' ? getBotBodyInput(bot, req.body, res.locals.rawBody) : req.query;
+    return queueBotExecution(bot, input, req.header('content-type') as string, res, responseStream);
   }
 
   // Execute the bot

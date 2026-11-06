@@ -81,8 +81,38 @@ export async function loadConfig(configName: string): Promise<ServerConfig> {
 
   validateShardingConfig(config);
   validateBackgroundJobsConfig(config);
+  validateVertexAiConfig(config);
+  if (
+    config.queuedBotIds !== undefined &&
+    (!Array.isArray(config.queuedBotIds) || !config.queuedBotIds.every((id) => typeof id === 'string' && id.length > 0))
+  ) {
+    throw new Error('Invalid queuedBotIds config: expected an array of Bot IDs');
+  }
   cachedConfig = addDefaults(config);
   return cachedConfig;
+}
+
+/**
+ * Validate untyped settings before constructing an authenticated provider URL.
+ * @param config - The merged server configuration.
+ */
+function validateVertexAiConfig(config: MedplumServerConfig): void {
+  const vertex: unknown = config.vertexAi;
+  if (vertex === undefined) {
+    return;
+  }
+  if (
+    !isObject(vertex) ||
+    typeof vertex.projectId !== 'string' ||
+    !/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(vertex.projectId) ||
+    typeof vertex.location !== 'string' ||
+    !/^[a-z][a-z0-9-]*[a-z0-9]$/.test(vertex.location) ||
+    !Array.isArray(vertex.allowedModels) ||
+    vertex.allowedModels.length === 0 ||
+    !vertex.allowedModels.every((model: unknown) => typeof model === 'string' && model.length > 0)
+  ) {
+    throw new Error('Invalid vertexAi config: projectId, location, and non-empty allowedModels are required');
+  }
 }
 
 /**

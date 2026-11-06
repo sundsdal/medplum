@@ -359,6 +359,59 @@ See [BullMQ Job Removal](https://docs.bullmq.io/guide/jobs/auto-removal).
 
 **Default:** `false`
 
+### vertexAi
+
+Optional configuration for `$ai` to use Vertex AI's OpenAI-compatible chat endpoint
+with Application Default Credentials. The service identity needs Vertex AI access
+in the configured Google Cloud project. Credentials are refreshed by the Google
+authentication library; do not store an access token in `Project.secret`.
+
+```json
+{
+  "vertexAi": {
+    "projectId": "my-google-project",
+    "location": "eu",
+    "allowedModels": ["google/gemini-3.8-flash"]
+  }
+}
+```
+
+Alternatively, set `MEDPLUM_VERTEX_AI` to this inner JSON object. Only listed
+models and the chat API are accepted. Each Medplum project still needs the `ai`
+feature, and existing caller authorization applies. Without this setting, the
+existing project-secret provider configuration remains in effect.
+
+### queuedBotIds
+
+Optional array of exact Bot IDs whose HTTP `$execute` calls run through the
+existing dispatch worker. Default: empty. Set `MEDPLUM_QUEUED_BOT_IDS` to a JSON
+array for environment-based configuration. The dispatch worker must be enabled.
+
+The waiting HTTP request forwards the result, including streaming output via
+bounded BullMQ job progress, without a separate listener or worker. Execution
+requires a native login without delegation; `Prefer: respond-async` is unsupported.
+The worker reloads the login, membership and policy before reading and executing
+the Bot. Jobs carry identifiers and input, without serialized credentials.
+
+The request deadline is 120 seconds; a queued job that has not started by then
+fails. Disconnecting does not interrupt an already-running bot. Input, result and
+encoded stream progress are bounded by `maxJsonSize`. Completed jobs are removed
+after delivery; fallback age retention is evaluated on later queue finalizations.
+Queue storage and backups can therefore contain bot input and output.
+
+Drain older dispatch workers before enabling this setting: older releases do not
+understand the new job type. Disable these calls and drain their jobs before
+rolling back. This setting changes HTTP execution only, not subscriptions or cron.
+
+### spacesOwnedConversationsEnabled
+
+Optional flag, default `false`. Set
+`MEDPLUM_SPACES_OWNED_CONVERSATIONS_ENABLED=true` to validate Spaces topics and
+message parents: one literal local topic reference, matching sender and project,
+and no nested or clinical parent. Provider stamps the current profile as sender on
+user, assistant and tool messages. Access policies must separately restrict writes
+to the caller's sender and Spaces identifiers; this flag does not grant access.
+
 ### dataWarehouse
 
 :::info[Enterprise feature]

@@ -60,6 +60,17 @@ describe('Config', () => {
     await expect(loadConfig('env')).rejects.toThrow('Missing required config setting: baseUrl');
   });
 
+  test('Vertex configuration is parsed and validated', async () => {
+    setEnv('MEDPLUM_BASE_URL', 'http://localhost:3000');
+    const vertex = { projectId: 'example-project', location: 'eu', allowedModels: ['google/gemini-3.8-flash'] };
+    setEnv('MEDPLUM_VERTEX_AI', JSON.stringify(vertex));
+    expect((await loadConfig('env')).vertexAi).toEqual(vertex);
+    setEnv('MEDPLUM_VERTEX_AI', JSON.stringify({ ...vertex, location: 'eu.evil.example' }));
+    await expect(loadConfig('env')).rejects.toThrow('Invalid vertexAi config');
+    setEnv('MEDPLUM_VERTEX_AI', JSON.stringify({ ...vertex, allowedModels: [] }));
+    await expect(loadConfig('env')).rejects.toThrow('Invalid vertexAi config');
+  });
+
   test('Load env config', async () => {
     setEnv('MEDPLUM_BASE_URL', 'http://localhost:3000');
     setEnv('MEDPLUM_PORT', '3000');
@@ -78,6 +89,15 @@ describe('Config', () => {
     expect(config.smtp?.host).toStrictEqual('smtp.example.com');
     expect(config.autoDownloadEnabled).toBe(true);
     expect(getConfig()).toBe(config);
+  });
+
+  test('Spaces ownership is opt-in and parses as a boolean', async () => {
+    setEnv('MEDPLUM_BASE_URL', 'http://localhost:3000');
+    expect((await loadConfig('env')).spacesOwnedConversationsEnabled).toBeUndefined();
+    setEnv('MEDPLUM_SPACES_OWNED_CONVERSATIONS_ENABLED', 'false');
+    expect((await loadConfig('env')).spacesOwnedConversationsEnabled).toBe(false);
+    setEnv('MEDPLUM_SPACES_OWNED_CONVERSATIONS_ENABLED', 'true');
+    expect((await loadConfig('env')).spacesOwnedConversationsEnabled).toBe(true);
   });
 
   test('Load database SSL env config', async () => {
@@ -532,7 +552,7 @@ describe('Config', () => {
     expect(config.readonlyDatabase).toBeDefined();
     expect(config.readonlyDatabase?.username).toStrictEqual('medplum_test_readonly');
     expect(config.readonlyDatabase?.password).toStrictEqual('medplum_test_readonly');
-    expect(config.redis.db).toStrictEqual(7);
+    expect(config.redis.db).toStrictEqual(Number(process.env.MEDPLUM_TEST_REDIS_DB ?? 7));
     expect(config.approvedSenderEmails).toStrictEqual('no-reply@example.com');
     expect(config.emailProvider).toStrictEqual('none');
     expect(config.logLevel).toStrictEqual('error');

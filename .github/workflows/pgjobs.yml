@@ -81,7 +81,7 @@ jobs:
           go-version-file: postkeys-ci/go.mod
       - run: npm ci
       - name: Build server and dependencies
-        run: npx turbo run build --filter=@medplum/server...
+        run: npx turbo run build --filter=@medplum/server... --filter='medplum-provider^...'
       - name: Create isolated test databases and roles
         env:
           PGPASSWORD: synthetic-ci-only
@@ -112,5 +112,13 @@ jobs:
       - name: Verify external authentication and native token exchange
         working-directory: packages/server
         run: npx vitest run --no-file-parallelism --maxWorkers=1 src/auth/external.test.ts src/oauth/external.test.ts src/oauth/token.test.ts
+      - name: Verify queued bots, Vertex configuration and conversation ownership
+        working-directory: packages/server
+        run: npx vitest run --no-file-parallelism --maxWorkers=1 src/ai/vertex.test.ts src/config/loader.test.ts src/fhir/operations/ai.test.ts src/bots/queued.test.ts src/bots/queued.integration.test.ts src/fhir/repository/spaces-ownership.test.ts src/workers/dispatch.test.ts
+      - name: Verify Provider conversation persistence and model options
+        working-directory: examples/medplum-provider
+        run: npx vitest run src/utils/spaceModels.test.ts src/utils/spacePersistence.test.ts
+      - name: Lint queued bots and Vertex integration
+        run: npx eslint packages/server/src/ai/vertex*.ts packages/server/src/bots/queued*.ts packages/server/src/fhir/operations/execute.ts packages/server/src/fhir/operations/ai*.ts packages/server/src/fhir/repository/validation.ts packages/server/src/fhir/repository/spaces-ownership.test.ts packages/server/src/workers/dispatch.ts examples/medplum-provider/src/utils/spaceModels*.ts examples/medplum-provider/src/utils/spacePersistence*.ts examples/medplum-provider/src/pages/spaces/PromptComposer.tsx
       - name: Lint authentication changes
         run: npx eslint packages/server/src/config/types.ts packages/server/src/auth/external.ts packages/server/src/oauth/utils.ts packages/server/src/oauth/token.ts packages/server/src/oauth/external.test.ts packages/server/src/oauth/token.test.ts

@@ -5,6 +5,7 @@ import {
   badRequest,
   getReferenceString,
   isResource,
+  isUUID,
   OperationOutcomeError,
   Operator,
   validateResource,
@@ -12,6 +13,7 @@ import {
 import type {
   CodeableConcept,
   Coding,
+  Communication,
   Cron,
   OperationOutcomeIssue,
   Reference,
@@ -42,6 +44,9 @@ export async function validateRepositoryResource(repo: Repository, resource: Res
     validateCronString(resource);
     await validateCronReferences(repo, resource);
   }
+  if (resource.resourceType === 'Communication' && getConfig().spacesOwnedConversationsEnabled) {
+    await validateSpacesConversation(repo, resource);
+  }
 
   if (repo.getConfig().strictMode) {
     await validateRepositoryResourceStrictly(repo, resource);
@@ -58,6 +63,86 @@ export async function validateRepositoryResource(repo: Repository, resource: Res
         err,
       });
     }
+  }
+}
+
+const spacesIdentifierSystem = 'http://medplum.com/ai-message';
+
+function hasSpacesIdentifier(resource: Communication, value: string): boolean {
+  return (
+    resource.identifier?.some(
+      (identifier) => identifier.system === spacesIdentifierSystem && identifier.value === value
+    ) ?? false
+  );
+}
+
+/**
+ * Check the literal parent before conditional references are rewritten.
+ * @param resource - The proposed resource.
+ */
+export function validateSpacesParentSyntax(resource: Resource): void {
+  if (
+    !getConfig().spacesOwnedConversationsEnabled ||
+    resource.resourceType !== 'Communication' ||
+    !hasSpacesIdentifier(resource, 'ai-message')
+  ) {
+    return;
+  }
+  const parts = resource.partOf?.[0]?.reference?.split('/');
+  if (resource.partOf?.length !== 1 || parts?.length !== 2 || parts[0] !== 'Communication' || !isUUID(parts[1])) {
+    throw new OperationOutcomeError(
+      badRequest('Spaces message requires one local Communication topic', 'Communication.partOf')
+    );
+  }
+}
+
+/**
+ * Validate the relationship separately from the access policy, which controls who may write.
+ * @param repo - The author's repository with its existing access policy.
+ * @param resource - The proposed Spaces Communication.
+ */
+async function validateSpacesConversation(repo: Repository, resource: Communication): Promise<void> {
+  const topic = hasSpacesIdentifier(resource, 'ai-message-topic');
+  const message = hasSpacesIdentifier(resource, 'ai-message');
+  if (!topic && !message) {
+    return;
+  }
+  const sender = resource.sender?.reference;
+  const senderParts = sender?.split('/');
+  if (
+    senderParts?.length !== 2 ||
+    !['Patient', 'Practitioner', 'RelatedPerson'].includes(senderParts[0]) ||
+    !isUUID(senderParts[1])
+  ) {
+    throw new OperationOutcomeError(
+      badRequest('Spaces conversation requires a local sender reference', 'Communication.sender')
+    );
+  }
+  if (topic) {
+    if (message || resource.partOf?.length) {
+      throw new OperationOutcomeError(
+        badRequest('Spaces topic cannot have a parent or message identifier', 'Communication.partOf')
+      );
+    }
+    return;
+  }
+  const parent = resource.partOf?.[0];
+  validateSpacesParentSyntax(resource);
+  // Keep server metadata for the project check without changing the caller's access policy.
+  const [resolved] = await repo.withOverrideConfig({ extendedMode: true }).readReferences([parent as Reference]);
+  if (
+    !isResource(resolved) ||
+    resolved.resourceType !== 'Communication' ||
+    !hasSpacesIdentifier(resolved, 'ai-message-topic') ||
+    hasSpacesIdentifier(resolved, 'ai-message') ||
+    resolved.partOf?.length ||
+    resolved.sender?.reference !== sender ||
+    !resource.meta?.project ||
+    resolved.meta?.project !== resource.meta.project
+  ) {
+    throw new OperationOutcomeError(
+      badRequest('Cannot resolve an owned Spaces topic in this project', 'Communication.partOf')
+    );
   }
 }
 

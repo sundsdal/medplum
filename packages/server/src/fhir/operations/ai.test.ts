@@ -7,8 +7,9 @@ import type { Response } from 'supertest';
 import request from 'supertest';
 import type { Mock } from 'vitest';
 import { vi } from 'vitest';
+import * as vertex from '../../ai/vertex';
 import { initApp, shutdownApp } from '../../app';
-import { loadTestConfig } from '../../config/loader';
+import { getConfig, loadTestConfig } from '../../config/loader';
 import { addTestUser, createTestProject, initTestAuth, withTestContext } from '../../test.setup';
 
 const app = express();
@@ -64,6 +65,49 @@ describe('AI Operation', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  test('Vertex uses ADC and chat for allowed models, rejecting other models and APIs', async () => {
+    const config = getConfig();
+    config.vertexAi = { projectId: 'example-project', location: 'eu', allowedModels: ['google/gemini-3.8-flash'] };
+    const credentials = vi.spyOn(vertex, 'getVertexCredentials').mockResolvedValue({
+      apiKey: 'adc-token',
+      baseUrl: 'https://eu-aiplatform.googleapis.com/v1beta1/projects/example-project/locations/eu/endpoints/openapi',
+    });
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ choices: [{ message: { content: 'ok' } }] }),
+    });
+    const parameters = (model: string, api?: string): Parameters => ({
+      resourceType: 'Parameters',
+      parameter: [
+        { name: 'messages', valueString: '[]' },
+        { name: 'model', valueString: model },
+        { name: 'tools', valueString: JSON.stringify(fhirTools) },
+        { name: 'reasoning_effort', valueString: 'low' },
+        ...(api ? [{ name: 'api', valueCode: api }] : []),
+      ],
+    });
+    const call = (body: Parameters): request.Test =>
+      request(app)
+        .post('/fhir/R4/$ai')
+        .set('Authorization', 'Bearer ' + accessToken)
+        .set('Content-Type', ContentType.FHIR_JSON)
+        .send(body);
+    try {
+      expect((await call(parameters('google/gemini-3.8-flash'))).status).toBe(200);
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringMatching(/endpoints\/openapi\/chat\/completions$/),
+        expect.objectContaining({ headers: expect.objectContaining({ Authorization: 'Bearer adc-token' }) })
+      );
+      expect((await call(parameters('other-model'))).status).toBe(400);
+      expect((await call(parameters('google/gemini-3.8-flash', 'responses'))).status).toBe(400);
+      expect(credentials).toHaveBeenCalledTimes(1);
+    } finally {
+      credentials.mockRestore();
+      delete config.vertexAi;
+    }
   });
 
   test('Happy path', async () => {

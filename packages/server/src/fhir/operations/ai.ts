@@ -6,7 +6,9 @@ import type { Login, OperationDefinitionParameter, ParametersParameter } from '@
 import type { Response as ExpressResponse, Request } from 'express';
 import type { AiApi, AiContext, AiResult } from '../../ai/openai';
 import { callOpenAi, streamOpenAi } from '../../ai/openai';
+import { getVertexCredentials } from '../../ai/vertex';
 import { hasSmartResourceScopes } from '../../auth/utils';
+import { getConfig } from '../../config/loader';
 import { getAuthenticatedContext } from '../../context';
 import { getLogger } from '../../logger';
 import { sendOutcome } from '../outcomes';
@@ -150,17 +152,6 @@ export async function aiOperation(
     return [forbidden];
   }
 
-  const apiKey = ctx.project.secret?.find((s) => s.name === 'OPENAI_API_KEY')?.valueString;
-  if (!apiKey) {
-    return [badRequest('OpenAI API key not configured in project secrets')];
-  }
-
-  let baseUrl = ctx.project.secret?.find((s) => s.name === 'LLM_BASE_URL')?.valueString ?? 'https://api.openai.com/v1';
-  // Strip any trailing slashes without a regex to avoid backtracking concerns
-  while (baseUrl.endsWith('/')) {
-    baseUrl = baseUrl.slice(0, -1);
-  }
-
   const params = parseInputParameters<AIOperationParameters>(operation, req);
   let messages: unknown[];
   try {
@@ -194,13 +185,40 @@ export async function aiOperation(
     ];
   }
 
+  const vertex = getConfig().vertexAi;
+  let apiKey: string;
+  let baseUrl: string;
+  if (vertex) {
+    if (!vertex.allowedModels.includes(params.model)) {
+      return [badRequest('Model is not allowed for Vertex AI')];
+    }
+    if (params.api && params.api !== 'chat') {
+      return [badRequest('Vertex AI supports only the chat API')];
+    }
+    try {
+      ({ apiKey, baseUrl } = await getVertexCredentials(vertex));
+    } catch {
+      return [badRequest('Failed to obtain Vertex AI credentials')];
+    }
+  } else {
+    const projectKey = ctx.project.secret?.find((s) => s.name === 'OPENAI_API_KEY')?.valueString;
+    if (!projectKey) {
+      return [badRequest('OpenAI API key not configured in project secrets')];
+    }
+    apiKey = projectKey;
+    baseUrl = ctx.project.secret?.find((s) => s.name === 'LLM_BASE_URL')?.valueString ?? 'https://api.openai.com/v1';
+    while (baseUrl.endsWith('/')) {
+      baseUrl = baseUrl.slice(0, -1);
+    }
+  }
+
   const context: AiContext = {
     messages,
     model: params.model,
     tools,
     temperature: params.temperature,
     reasoningEffort: params.reasoning_effort,
-    api: params.api,
+    api: vertex ? 'chat' : params.api,
     apiKey,
     baseUrl,
   };

@@ -4,6 +4,8 @@ import { ResourceNotFoundException } from '@aws-sdk/client-lambda';
 import type { BackgroundJobContext, BackgroundJobInteraction, WithId } from '@medplum/core';
 import type { DicomInstance, Project, Resource, ResourceType } from '@medplum/fhirtypes';
 import type { Job } from 'bullmq';
+import type { QueuedBotJobData } from '../bots/queued';
+import { execQueuedBotJob } from '../bots/queued';
 import { deleteLambda, getLambdaNameForBot } from '../cloud/aws/deploy';
 import { getBotManagementLambdaClient } from '../cloud/aws/lambda';
 import { getConfig } from '../config/loader';
@@ -41,17 +43,33 @@ export interface DispatchJobData {
 
 const queueName = 'DispatchQueue';
 const jobName = 'DispatchJobData';
+export const queuedBotJobName = 'QueuedBotJob';
+type DispatchData = DispatchJobData | QueuedBotJobData;
 
 export const initDispatchWorker: WorkerInitializer = (config, options?: WorkerInitializerOptions) => {
   const queueOptions = defaultQueueOptions(config);
-  const queue = new Queue<DispatchJobData>(queueName, queueOptions);
+  const queue = new Queue<DispatchData>(queueName, queueOptions);
 
-  let worker: Worker<DispatchJobData> | undefined;
+  let worker: Worker<DispatchData> | undefined;
   if (options?.workerEnabled !== false) {
-    worker = new Worker<DispatchJobData>(
+    worker = new Worker<DispatchData>(
       queueName,
       trackJobMetrics('dispatch', (job) =>
-        tryRunInRequestContext(job.data.requestId, job.data.traceId, () => execDispatchJob(job))
+        tryRunInRequestContext(job.data.requestId, job.data.traceId, async () => {
+          if (job.name === queuedBotJobName) {
+            return execQueuedBotJob(job.data as QueuedBotJobData, job as Job<QueuedBotJobData>);
+          }
+          if (job.name === jobName) {
+            // Finished jobs share retention across this queue. A count of one on a
+            // dispatch job can otherwise delete a bot result before its HTTP poll.
+            if (getConfig().queuedBotIds?.length) {
+              job.opts.removeOnComplete = { age: 120 };
+              job.opts.removeOnFail = { age: 120 };
+            }
+            return execDispatchJob(job as Job<DispatchJobData>);
+          }
+          throw new Error('Unknown dispatch job');
+        })
       ),
       getWorkerBullmqConfig(config, 'dispatch', queueOptions)
     );
@@ -67,8 +85,8 @@ export const initDispatchWorker: WorkerInitializer = (config, options?: WorkerIn
  * @returns The dispatch queue.
  * @throws Error if the dispatch queue is not initialized.
  */
-export function getDispatchQueue(): Queue<DispatchJobData> {
-  const queue = queueRegistry.get<DispatchJobData>(queueName);
+export function getDispatchQueue(): Queue<DispatchData> {
+  const queue = queueRegistry.get<DispatchData>(queueName);
   if (!queue) {
     throw new Error(`${queueName} is not initialized; call initWorkers() before enqueuing dispatch jobs`);
   }

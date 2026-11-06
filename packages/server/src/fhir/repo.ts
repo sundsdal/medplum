@@ -144,7 +144,7 @@ import {
   buildResourceRow,
   parseHistoryContent,
 } from './repository/row-builder';
-import { validateRepositoryResource } from './repository/validation';
+import { validateRepositoryResource, validateSpacesParentSyntax } from './repository/validation';
 import type { ResourceCap } from './resource-cap';
 import { getFullUrl } from './response';
 import { rewriteAttachments, RewriteMode } from './rewrite';
@@ -1054,6 +1054,8 @@ export class Repository extends FhirRepository implements Disposable {
         throw new OperationOutcomeError(preconditionFailed);
       }
     }
+
+    validateSpacesParentSyntax(validatedResource);
 
     // replaceConditionalReferences rewrites nested references in place, so it needs a resource
     // that shares no structure with validatedResource or the cached existing resource.
