@@ -44,6 +44,7 @@ import {
   getClientApplication,
   getClientApplicationMembership,
   getExternalUserInfo,
+  getMembershipByExternalId,
   hashCode,
   isExternalEmailUnverified,
   revokeLogin,
@@ -582,9 +583,49 @@ export async function exchangeExternalAuthToken(
     projectId = await getProjectIdByClientId(clientId, undefined);
   }
 
+  const settings = client?.extension?.filter(
+    (ext) => ext.url === 'https://id.kin.health/StructureDefinition/managed-membership-system'
+  );
+  const system = settings?.[0]?.valueUri;
+  const managedExchange = Boolean(settings?.length) || req.body.managed_membership_system !== undefined;
+  if (
+    managedExchange &&
+    (settings?.length !== 1 ||
+      !system ||
+      req.body.managed_membership_system !== system ||
+      !projectId ||
+      !client ||
+      (client.status && client.status !== 'active') ||
+      client.grantType?.includes('refresh_token') ||
+      !idp.useSubject ||
+      !idp.issuer ||
+      !idp.audience ||
+      !idp.jwksUrl ||
+      idp.userInfoUrl ||
+      req.body.scope !== 'openid' ||
+      req.body.membership_id !== undefined)
+  ) {
+    sendTokenError(res, 'access_denied', 'Invalid managed membership exchange', 403);
+    return;
+  }
+
   const userInfo = await tryGetExternalUserInfo(res, idp, subjectToken);
   if (!userInfo) {
     return;
+  }
+  let managedMember: WithId<ProjectMembership> | undefined;
+  if (managedExchange) {
+    if (!projectId || !system || !isString(userInfo.sub) || !userInfo.sub || typeof userInfo.exp !== 'number') {
+      sendTokenError(res, 'access_denied', 'Invalid managed membership', 403);
+      return;
+    }
+    managedMember = await findManagedMembership(projectId, userInfo.sub, system);
+    if (!managedMember) {
+      sendTokenError(res, 'access_denied', 'Invalid managed membership', 403);
+      return;
+    }
+    membershipId = managedMember.id;
+    requestedMembership = managedMember;
   }
 
   // A verified subject authorizes only the membership that names that exact subject.
@@ -631,13 +672,50 @@ export async function exchangeExternalAuthToken(
     membershipId,
   });
 
-  // Token exchange carries the same proof as the external auth callback, so verify on the
-  // same terms.
-  await systemRepo.patchResource<User>('User', resolveId(login.user) as string, [
-    { op: 'add', path: '/emailVerified', value: true },
-  ]);
+  // A managed exchange proves the external subject. It makes no assertion about the user's email.
+  if (!managedMember) {
+    await systemRepo.patchResource<User>('User', resolveId(login.user) as string, [
+      { op: 'add', path: '/emailVerified', value: true },
+    ]);
+  }
 
-  await sendTokenResponse(req, res, login, client);
+  await sendTokenResponse(req, res, login, client, managedMember);
+}
+
+// Only the token issuer can inspect all memberships in the client project.
+async function findManagedMembership(
+  project: string,
+  subject: string,
+  system: string
+): Promise<WithId<ProjectMembership> | undefined> {
+  const projectRef = `Project/${project}`;
+  const member = await getMembershipByExternalId(getGlobalSystemRepo(), subject, project);
+  if (
+    member?.project.reference !== projectRef ||
+    member.meta?.project !== project ||
+    member.externalId !== subject ||
+    member.active === false ||
+    member.admin !== false ||
+    !/^Practitioner\/[A-Za-z0-9.-]{1,64}$/.test(member.profile?.reference ?? '') ||
+    !/^User\/[A-Za-z0-9.-]{1,64}$/.test(member.user.reference ?? '')
+  ) {
+    return undefined;
+  }
+  const identifiers = member.identifier?.filter((i) => i.system === system);
+  const policies = (member.access ?? []).map((entry) => entry.policy);
+  if (member.accessPolicy) {
+    policies.push(member.accessPolicy);
+  }
+  if (
+    identifiers?.length !== 1 ||
+    identifiers[0].value !== subject ||
+    !policies.length ||
+    !policies.every((policy) => /^AccessPolicy\/[A-Za-z0-9.-]{1,64}$/.test(policy?.reference ?? ''))
+  ) {
+    return undefined;
+  }
+  const projectResource = await getGlobalSystemRepo().readReference(member.project);
+  return projectResource.superAdmin ? undefined : member;
 }
 
 function validateExternalAuthTokenExchangeRequest(
@@ -1042,12 +1120,14 @@ async function validateClientIdAndSecret(
  * @param res - The HTTP response.
  * @param login - The user login.
  * @param client - The client application. Optional.
+ * @param managedMember - The exact membership and version selected for a managed exchange.
  */
 async function sendTokenResponse(
   req: Request,
   res: Response,
   login: WithId<Login>,
-  client?: ClientApplication
+  client?: ClientApplication,
+  managedMember?: WithId<ProjectMembership>
 ): Promise<void> {
   const config = getConfig();
 
@@ -1056,6 +1136,17 @@ async function sendTokenResponse(
   const membership = await systemRepo.readReference<ProjectMembership>(
     login.membership as Reference<ProjectMembership>
   );
+
+  if (
+    managedMember &&
+    (membership.id !== managedMember.id ||
+      !managedMember.meta?.versionId ||
+      membership.meta?.versionId !== managedMember.meta.versionId ||
+      login.user?.reference !== managedMember.user.reference)
+  ) {
+    sendTokenError(res, 'access_denied', 'Managed membership changed', 403);
+    return;
+  }
 
   const tokens = await getAuthTokens(user, login, membership.profile as Reference<ProfileResource>, {
     accessLifetime: client?.accessTokenLifetime,
@@ -1096,6 +1187,7 @@ async function sendTokenResponse(
   const { exp, iat } = parseJWTPayload(tokens.accessToken);
 
   res.status(200).json({
+    ...(managedMember && { managed_membership: `ProjectMembership/${managedMember.id}` }),
     token_type: 'Bearer',
     expires_in: (exp ?? 0) - (iat ?? 0),
     scope: login.scope,

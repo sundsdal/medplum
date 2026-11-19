@@ -2381,6 +2381,220 @@ describe('OAuth2 Token', () => {
     }
   });
 
+  test('Managed token exchange binds a verified subject to one safe managed membership', async () => {
+    const previousVerify = vi.mocked(jwtVerify).getMockImplementation();
+    const realJose = await vi.importActual<typeof Jose>('jose');
+    vi.mocked(jwtVerify).mockImplementation(realJose.jwtVerify);
+    try {
+      const keyPair = await generateKeyPair('ES256');
+      const publicJwk = await exportJWK(keyPair.publicKey);
+      const subject = randomUUID();
+      const issuer = 'https://id.example/realms/staff';
+      const system = `${issuer}/managed-staff`;
+      const policy = await systemRepo.createResource<AccessPolicy>({
+        resourceType: 'AccessPolicy',
+        resource: [{ resourceType: 'Patient', readonly: true }],
+      });
+      const { membership: invited } = await inviteUser({
+        project,
+        resourceType: 'Practitioner',
+        firstName: 'Synthetic',
+        lastName: 'Staff',
+        externalId: subject,
+      });
+      const globalRepo = getGlobalSystemRepo();
+      let membership = await globalRepo.updateResource<ProjectMembership>({
+        ...invited,
+        active: true,
+        admin: false,
+        identifier: [{ system, value: subject }],
+        accessPolicy: createReference(policy),
+      });
+      const managedClient = await createClient(systemRepo, {
+        project,
+        name: 'Managed subject exchange',
+        extension: [{ url: 'https://id.kin.health/StructureDefinition/managed-membership-system', valueUri: system }],
+        identityProvider: { issuer, audience: 'staff-api', jwksUrl: 'https://id.example/jwks', useSubject: true },
+      });
+      fetchMock.mockImplementation(() => mockFetchJson({ keys: [publicJwk] }));
+      const signed = async (
+        claims: { sub?: string; iss?: string; aud?: string; exp?: string } = {}
+      ): Promise<string> => {
+        let jwt = new SignJWT({})
+          .setProtectedHeader({ alg: 'ES256' })
+          .setIssuer(claims.iss ?? issuer)
+          .setSubject(claims.sub ?? subject)
+          .setAudience(claims.aud ?? 'staff-api')
+          .setIssuedAt();
+        if (claims.exp !== 'missing') {
+          jwt = jwt.setExpirationTime(claims.exp ?? '5m');
+        }
+        return jwt.sign(keyPair.privateKey);
+      };
+      const exchange = (token: string, extra: Record<string, string> = {}): Promise<request.Response> =>
+        request(app)
+          .post('/oauth2/token')
+          .type('form')
+          .send({
+            grant_type: OAuthGrantType.TokenExchange,
+            subject_token_type: OAuthTokenType.AccessToken,
+            client_id: managedClient.id,
+            subject_token: token,
+            managed_membership_system: system,
+            scope: 'openid',
+            ...extra,
+          });
+      const token = await signed();
+      const success = await exchange(token);
+      expect(success).toHaveStatus(200);
+      expect(success.body.managed_membership).toBe(`ProjectMembership/${membership.id}`);
+      expect(success.body.access_token).toBeTruthy();
+      expect(success.body.refresh_token).toBeUndefined();
+      const me = await request(app).get('/auth/me').set('Authorization', `Bearer ${success.body.access_token}`);
+      expect(me).toHaveStatus(200);
+      expect(me.body.membership.id).toBe(membership.id);
+      expect(me.body.membership.admin).toBe(false);
+      const patient = await systemRepo.createResource({
+        resourceType: 'Patient',
+        meta: { project: project.id },
+        active: true,
+      });
+      const readPatient = (accessToken: string): Promise<request.Response> =>
+        request(app).get(`/fhir/R4/Patient/${patient.id}`).set('Authorization', `Bearer ${accessToken}`);
+      expect(await readPatient(success.body.access_token)).toHaveStatus(200);
+      const pendingPolicy = await systemRepo.createResource<AccessPolicy>({
+        resourceType: 'AccessPolicy',
+        name: 'Pending staff access',
+        resource: [{ resourceType: 'StructureDefinition', readonly: true }],
+      });
+      await globalRepo.updateResource<ProjectMembership>({
+        ...membership,
+        accessPolicy: createReference(pendingPolicy),
+      });
+      const pending = await exchange(token);
+      expect(pending).toHaveStatus(200);
+      const deniedRead = await readPatient(pending.body.access_token);
+      expect([403, 404]).toContain(deniedRead.status);
+      expect(deniedRead.body.resourceType).toBe('OperationOutcome');
+      expect(deniedRead.body.name).toBeUndefined();
+      membership = await globalRepo.updateResource<ProjectMembership>(membership);
+      expect((await exchange(token, { managed_membership_system: `${system}/other` })).status).not.toBe(200);
+      expect((await exchange(token, { managed_membership_system: '' })).status).not.toBe(200);
+      expect((await exchange(token, { membership_id: membership.id })).status).not.toBe(200);
+      expect((await exchange(token, { scope: 'openid offline_access' })).status).not.toBe(200);
+      expect((await exchange(token, { scope: '' })).status).not.toBe(200);
+      expect((await exchange(await signed({ iss: 'https://wrong.example' }))).status).not.toBe(200);
+      expect((await exchange(await signed({ aud: 'wrong' }))).status).not.toBe(200);
+      expect((await exchange(await signed({ exp: 'missing' }))).status).not.toBe(200);
+      expect((await exchange(await signed({ exp: '1 second ago' }))).status).not.toBe(200);
+      expect((await exchange(await signed({ sub: randomUUID() }))).status).not.toBe(200);
+      const otherKeys = await generateKeyPair('ES256');
+      const forged = await new SignJWT({})
+        .setProtectedHeader({ alg: 'ES256' })
+        .setIssuer(issuer)
+        .setSubject(subject)
+        .setAudience('staff-api')
+        .setExpirationTime('5m')
+        .sign(otherKeys.privateKey);
+      expect((await exchange(forged)).status).not.toBe(200);
+      for (const identityProvider of [
+        { audience: 'staff-api', jwksUrl: 'https://id.example/jwks', useSubject: true },
+        { issuer, jwksUrl: 'https://id.example/jwks', useSubject: true },
+        { issuer, audience: 'staff-api', useSubject: true },
+        { issuer, audience: 'staff-api', jwksUrl: 'https://id.example/jwks', useSubject: false },
+        {
+          issuer,
+          audience: 'staff-api',
+          jwksUrl: 'https://id.example/jwks',
+          useSubject: true,
+          userInfoUrl: 'https://id.example/userinfo',
+        },
+      ]) {
+        const invalidClient = await createClient(systemRepo, {
+          project,
+          extension: managedClient.extension,
+          identityProvider,
+        });
+        expect((await exchange(token, { client_id: invalidClient.id })).status).not.toBe(200);
+      }
+      const inactiveClient = await createClient(systemRepo, {
+        project,
+        extension: managedClient.extension,
+        identityProvider: managedClient.identityProvider,
+        status: 'off',
+      });
+      expect((await exchange(token, { client_id: inactiveClient.id })).status).not.toBe(200);
+      const refreshClient = await createClient(systemRepo, {
+        project,
+        extension: managedClient.extension,
+        identityProvider: managedClient.identityProvider,
+        grantType: ['refresh_token'],
+      });
+      expect((await exchange(token, { client_id: refreshClient.id })).status).not.toBe(200);
+      const assertDenied = async (): Promise<void> => {
+        const response = await exchange(token);
+        expect(response).toHaveStatus(403);
+        expect(response.body.error).toBe('access_denied');
+      };
+      for (const change of [
+        { active: false },
+        { admin: true },
+        { admin: undefined },
+        { identifier: [{ system, value: 'other' }] },
+        {
+          identifier: [
+            { system, value: subject },
+            { system, value: subject },
+          ],
+        },
+        { accessPolicy: undefined, access: undefined },
+        { accessPolicy: { reference: `Practitioner/${randomUUID()}` } },
+        { profile: { reference: `Patient/${randomUUID()}` } },
+      ]) {
+        await globalRepo.updateResource<ProjectMembership>({ ...membership, ...change });
+        await assertDenied();
+      }
+      membership = await globalRepo.updateResource<ProjectMembership>(membership);
+      const { membership: other } = await inviteUser({
+        project,
+        resourceType: 'Practitioner',
+        firstName: 'Other',
+        lastName: 'User',
+        externalId: randomUUID(),
+      });
+      // The native unique index prevents same-project duplicates, including inactive ones.
+      const duplicateError = await globalRepo
+        .updateResource<ProjectMembership>({
+          ...other,
+          externalId: subject,
+          active: false,
+        })
+        .catch((error: unknown) => error);
+      expect(MedplumCore.getStatus(MedplumCore.normalizeOperationOutcome(duplicateError))).toBe(409);
+
+      // A User can have multiple eligible memberships for distinct external subjects.
+      const otherSubject = randomUUID();
+      const sameUserMembership = await globalRepo.createResource<ProjectMembership>({
+        ...membership,
+        id: undefined,
+        meta: { project: project.id },
+        externalId: otherSubject,
+        identifier: [{ system, value: otherSubject }],
+      });
+      expect(sameUserMembership.id).not.toBe(membership.id);
+      const selected = await exchange(token);
+      expect(selected).toHaveStatus(200);
+      expect(selected.body.managed_membership).toBe(`ProjectMembership/${membership.id}`);
+      const otherSelected = await exchange(await signed({ sub: otherSubject }));
+      expect(otherSelected).toHaveStatus(200);
+      expect(otherSelected.body.managed_membership).toBe(`ProjectMembership/${sameUserMembership.id}`);
+    } finally {
+      if (previousVerify) {
+        vi.mocked(jwtVerify).mockImplementation(previousVerify);
+      }
+    }
+  });
+
   test('Token exchange rejects unknown client ID', async () => {
     const res = await request(app).post('/oauth2/token').type('form').send({
       grant_type: OAuthGrantType.TokenExchange,

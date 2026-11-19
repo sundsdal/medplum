@@ -820,20 +820,13 @@ export async function revokeLogin(systemRepo: SystemRepository, login: Login): P
   });
 }
 
-/**
- * Searches for a user by externalId and project.
- * External ID users are explicitly associated with the project.
- * @param systemRepo - The system repository.
- * @param externalId - The external ID.
- * @param projectId - The project ID.
- * @returns The user if found; otherwise, undefined.
- */
-export async function getUserByExternalId(
+// Schema migration v36 enforces uniqueness on (project, externalId).
+export function getMembershipByExternalId(
   systemRepo: SystemRepository,
   externalId: string,
   projectId: string
-): Promise<User | undefined> {
-  const membership = await systemRepo.searchOne<ProjectMembership>({
+): Promise<WithId<ProjectMembership> | undefined> {
+  return systemRepo.searchOne<ProjectMembership>({
     resourceType: 'ProjectMembership',
     filters: [
       {
@@ -848,6 +841,22 @@ export async function getUserByExternalId(
       },
     ],
   });
+}
+
+/**
+ * Searches for a user by externalId and project.
+ * External ID users are explicitly associated with the project.
+ * @param systemRepo - The system repository.
+ * @param externalId - The external ID.
+ * @param projectId - The project ID.
+ * @returns The user if found; otherwise, undefined.
+ */
+export async function getUserByExternalId(
+  systemRepo: SystemRepository,
+  externalId: string,
+  projectId: string
+): Promise<User | undefined> {
+  const membership = await getMembershipByExternalId(systemRepo, externalId, projectId);
   if (membership) {
     return systemRepo.readReference(membership.user as Reference<User>);
   }
