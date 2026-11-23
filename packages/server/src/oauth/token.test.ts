@@ -12,7 +12,7 @@ import type {
 } from '@medplum/fhirtypes';
 import express from 'express';
 import type * as Jose from 'jose';
-import { decodeJwt, generateKeyPair, jwtVerify, SignJWT } from 'jose';
+import { decodeJwt, exportJWK, generateKeyPair, jwtVerify, SignJWT } from 'jose';
 import { createHash, randomUUID, X509Certificate } from 'node:crypto';
 import request from 'supertest';
 import { vi } from 'vitest';
@@ -2367,6 +2367,120 @@ describe('OAuth2 Token', () => {
     expect(res.body.error).toBe('invalid_request');
     expect(res.body.error_description).toBe('Missing user info URL');
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test('Token exchange accepts verified subject JWTs only for their mapped membership', async () => {
+    const previousVerify = vi.mocked(jwtVerify).getMockImplementation();
+    const realJose = await vi.importActual<typeof Jose>('jose');
+    vi.mocked(jwtVerify).mockImplementation(realJose.jwtVerify);
+    try {
+      const keyPair = await generateKeyPair('ES256');
+      const publicJwk = await exportJWK(keyPair.publicKey);
+      const subject = randomUUID();
+      const { membership } = await inviteUser({
+        project,
+        resourceType: 'Practitioner',
+        firstName: 'IAP',
+        lastName: 'Inspector',
+        externalId: subject,
+      });
+      const { membership: other } = await inviteUser({
+        project,
+        resourceType: 'Practitioner',
+        firstName: 'Other',
+        lastName: 'User',
+        externalId: randomUUID(),
+      });
+      const broaderSameUser = await getGlobalSystemRepo().createResource<ProjectMembership>({
+        resourceType: 'ProjectMembership',
+        project: membership.project,
+        user: membership.user,
+        profile: membership.profile,
+        admin: true,
+      });
+      const baseProvider = {
+        issuer: externalAuthIssuer,
+        clientId: externalAuthConfigClientId,
+        identityProvider: {
+          jwksUrl: 'https://example.com/jwks',
+          audience: ['app-audience', 'provider-audience'],
+        },
+      };
+      const legacyProvider = {
+        ...baseProvider,
+        identityProvider: { ...baseProvider.identityProvider, useSubject: true },
+      };
+      config.externalAuthProviders = [legacyProvider];
+      fetchMock.mockImplementation(() => mockFetchJson({ keys: [publicJwk] }));
+      const signed = (sub: string, aud: string): Promise<string> =>
+        new SignJWT({})
+          .setProtectedHeader({ alg: 'ES256' })
+          .setIssuer(externalAuthIssuer)
+          .setSubject(sub)
+          .setAudience(aud)
+          .setIssuedAt()
+          .setExpirationTime('5m')
+          .sign(keyPair.privateKey);
+      const exchange = async (subjectToken: string, membershipId?: string): Promise<request.Response> =>
+        request(app)
+          .post('/oauth2/token')
+          .type('form')
+          .send({
+            grant_type: OAuthGrantType.TokenExchange,
+            subject_token_type: OAuthTokenType.AccessToken,
+            client_id: externalAuthConfigClientId,
+            subject_token: subjectToken,
+            ...(membershipId ? { membership_id: membershipId } : {}),
+          });
+      for (const audience of ['app-audience', 'provider-audience']) {
+        const response = await exchange(await signed(subject, audience), membership.id);
+        expect(response).toHaveStatus(200);
+        expect((await verifyJwt(response.body.access_token)).payload.login_id).toBeDefined();
+      }
+      config.externalAuthProviders = [
+        {
+          ...baseProvider,
+          identityProvider: {
+            ...baseProvider.identityProvider,
+            identitySource: 'subject',
+            identityMappingMode: 'project-membership-external-id',
+          },
+        },
+      ];
+      expect(await exchange(await signed(subject, 'app-audience'), membership.id)).toHaveStatus(200);
+      expect(await exchange(await signed(subject, 'app-audience'), other.id)).toHaveStatus(400);
+      config.externalAuthProviders = [
+        {
+          ...legacyProvider,
+          identityProvider: {
+            ...legacyProvider.identityProvider,
+            identitySource: 'email',
+            identityMappingMode: 'user-email',
+          },
+        },
+      ];
+      const emailOverride = await exchange(await signed(subject, 'app-audience'), membership.id);
+      expect(emailOverride).toHaveStatus(400);
+      expect(emailOverride.body.error_description).toBe('Missing user info URL');
+      config.externalAuthProviders = [legacyProvider];
+      const wrongAudience = await exchange(await signed(subject, 'wrong'), membership.id);
+      expect(wrongAudience).toHaveStatus(400);
+      expect(wrongAudience.body.error).toBe('invalid_request');
+      expect((await exchange(await signed(randomUUID(), 'app-audience'), membership.id)).status).not.toBe(200);
+      expect((await exchange(await signed(subject, 'app-audience'), other.id)).status).not.toBe(200);
+      const broader = await exchange(await signed(subject, 'app-audience'), broaderSameUser.id);
+      expect(broader).toHaveStatus(400);
+      expect(broader.body.error).toBe('invalid_request');
+      expect((await exchange(await signed(subject, 'app-audience'))).status).not.toBe(200);
+      await getGlobalSystemRepo().updateResource<ProjectMembership>({ ...membership, externalId: undefined });
+      const legacyUserFallback = await exchange(await signed(subject, 'app-audience'), membership.id);
+      expect(legacyUserFallback).toHaveStatus(400);
+      expect(legacyUserFallback.body.error).toBe('invalid_request');
+    } finally {
+      if (previousVerify) {
+        vi.mocked(jwtVerify).mockImplementation(previousVerify);
+      }
+    }
   });
 
   test('Token exchange rejects unknown client ID', async () => {

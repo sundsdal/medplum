@@ -12,7 +12,6 @@ import {
 } from '@medplum/core';
 import type { AsyncJob, Bundle, Parameters, ParametersParameter, Resource, ResourceType } from '@medplum/fhirtypes';
 import type { Job } from 'bullmq';
-import { Queue, Worker } from 'bullmq';
 import { getConfig } from '../config/loader';
 import { tryGetRequestContext, tryRunInRequestContext } from '../context';
 import { DatabaseMode, getDatabasePool, getDefaultStatementTimeout } from '../database';
@@ -30,6 +29,7 @@ import {
   normalizeJobTarget,
   requireSystemAsyncJob,
 } from './base';
+import { Queue, Worker } from './backend';
 import type { WorkerInitializer, WorkerInitializerOptions } from './utils';
 import {
   addVerboseQueueLogging,

@@ -19,23 +19,17 @@ import {
   parseJWTPayload,
   resolveId,
 } from '@medplum/core';
-import type {
-  ClientApplication,
-  IdentityProvider,
-  Login,
-  ProjectMembership,
-  Reference,
-  User,
-} from '@medplum/fhirtypes';
+import type { ClientApplication, Login, ProjectMembership, Reference, User } from '@medplum/fhirtypes';
 import type { Request, RequestHandler, Response } from 'express';
 import type { JWTVerifyOptions } from 'jose';
 import { createRemoteJWKSet, customFetch, jwtVerify } from 'jose';
 import { createHash, randomUUID } from 'node:crypto';
 import type { ExternalLoginIdentity } from '../auth/external';
-import { resolveExternalLoginIdentity } from '../auth/external';
+import { isSubjectMembershipMapping, resolveExternalLoginIdentity } from '../auth/external';
 import { getUserConfiguration } from '../auth/me';
 import { getProjectIdByClientId } from '../auth/utils';
 import { getConfig } from '../config/loader';
+import type { ExternalIdentityProvider } from '../config/types';
 import { AUTH_CODE_EXPIRATION_MS } from '../constants';
 import { getAccessPolicyForLogin } from '../fhir/accesspolicy';
 import { getInactiveReason } from '../fhir/projectmembership';
@@ -58,6 +52,7 @@ import {
   revokeLogin,
   timingSafeEqualStr,
   tryLogin,
+  verifyExternalToken,
   verifyMultipleMatchingException,
 } from './utils';
 
@@ -584,17 +579,17 @@ export async function exchangeExternalAuthToken(
   }
 
   let projectId: string | undefined;
+  let requestedMembership: ProjectMembership | undefined;
   if (useServerExternalAuth) {
     if (membershipId) {
-      let membership: ProjectMembership;
       try {
-        membership = await systemRepo.readResource<ProjectMembership>('ProjectMembership', membershipId);
+        requestedMembership = await systemRepo.readResource<ProjectMembership>('ProjectMembership', membershipId);
       } catch {
         sendTokenError(res, 'invalid_request', 'Invalid membership');
         return;
       }
 
-      projectId = resolveId(membership.project);
+      projectId = resolveId(requestedMembership.project);
       if (!projectId) {
         sendTokenError(res, 'invalid_request', 'Invalid membership');
         return;
@@ -612,6 +607,27 @@ export async function exchangeExternalAuthToken(
   const identity = await tryResolveExternalLoginIdentity(res, idp, userInfo);
   if (!identity) {
     return;
+  }
+
+  // A verified subject authorizes only the membership that names that exact subject.
+  // Do not allow a second membership of the same user or the legacy User.externalId fallback.
+  if (idp.jwksUrl && !idp.userInfoUrl && identity.externalId) {
+    if (!membershipId || !isString(userInfo.sub)) {
+      sendTokenError(res, 'invalid_request', 'Invalid membership', 400);
+      return;
+    }
+    if (!requestedMembership) {
+      try {
+        requestedMembership = await systemRepo.readResource<ProjectMembership>('ProjectMembership', membershipId);
+      } catch {
+        sendTokenError(res, 'invalid_request', 'Invalid membership', 400);
+        return;
+      }
+    }
+    if (requestedMembership.externalId !== userInfo.sub || resolveId(requestedMembership.project) !== projectId) {
+      sendTokenError(res, 'invalid_request', 'Invalid membership', 400);
+      return;
+    }
   }
 
   if (identity.email && isExternalEmailUnverified(userInfo)) {
@@ -682,16 +698,22 @@ async function tryReadTokenExchangeClient(
 
 async function tryGetExternalUserInfo(
   res: Response,
-  idp: IdentityProvider,
+  idp: ExternalIdentityProvider,
   subjectToken: string
 ): Promise<JWTPayload | undefined> {
-  if (!idp.userInfoUrl) {
+  if (!idp.userInfoUrl && (!idp.jwksUrl || !isSubjectMembershipMapping(idp))) {
     sendTokenError(res, 'invalid_request', 'Missing user info URL', 400);
     return undefined;
   }
   try {
-    return await getExternalUserInfo(idp.userInfoUrl, subjectToken, idp);
+    return idp.userInfoUrl
+      ? await getExternalUserInfo(idp.userInfoUrl, subjectToken, idp)
+      : await verifyExternalToken(idp, subjectToken);
   } catch (err: any) {
+    if (!idp.userInfoUrl) {
+      sendTokenError(res, 'invalid_request', 'Invalid subject_token', 400);
+      return undefined;
+    }
     const outcome = normalizeOperationOutcome(err);
     sendTokenError(res, 'invalid_request', normalizeErrorString(err), getStatus(outcome));
     return undefined;
@@ -700,7 +722,7 @@ async function tryGetExternalUserInfo(
 
 async function tryResolveExternalLoginIdentity(
   res: Response,
-  idp: IdentityProvider,
+  idp: ExternalIdentityProvider,
   userInfo: JWTPayload
 ): Promise<ExternalLoginIdentity | undefined> {
   try {
@@ -714,18 +736,25 @@ async function tryResolveExternalLoginIdentity(
   }
 }
 
-function resolveExternalAuthProvider(clientId: string, client?: ClientApplication): IdentityProvider | undefined {
+function resolveExternalAuthProvider(
+  clientId: string,
+  client?: ClientApplication
+): ExternalIdentityProvider | undefined {
   const externalAuthConfig = getConfig().externalAuthProviders?.find(
     (provider) => (provider.clientId ?? provider.identityProvider?.clientId) === clientId
   );
   if (externalAuthConfig) {
     if (externalAuthConfig.identityProvider) {
-      return externalAuthConfig.identityProvider;
+      return {
+        issuer: externalAuthConfig.issuer,
+        userInfoUrl: externalAuthConfig.userInfoUrl,
+        ...externalAuthConfig.identityProvider,
+      };
     }
 
     const userInfoUrl = externalAuthConfig.userInfoUrl;
     if (userInfoUrl) {
-      return { userInfoUrl };
+      return { issuer: externalAuthConfig.issuer, userInfoUrl };
     }
   }
 

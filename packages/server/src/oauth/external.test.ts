@@ -16,6 +16,7 @@ import type { SystemRepository } from '../fhir/repo';
 import { getProjectSystemRepo } from '../fhir/repo';
 import { addTestUser, createTestProject } from '../test.setup';
 import { mockFetchJson } from '../test.setup.fetch';
+import { verifyExternalToken } from './utils';
 
 // RFC 7662 - External auth
 
@@ -349,7 +350,7 @@ describe('External auth', () => {
   });
 
   test('Success by reference', async () => {
-    fetchMock.mockImplementationOnce(() => mockFetchJson({ ok: true }));
+    fetchMock.mockImplementation(() => mockFetchJson({ ok: true }));
 
     const jwt = createFakeJwt({
       iss: 'https://external-auth.example.com',
@@ -529,7 +530,7 @@ describe('External auth', () => {
     const keyPair = await generateKeyPair('ES256');
     const publicJwk = await exportJWK(keyPair.publicKey);
     const boundSub = 'system:serviceaccount:prod:' + randomUUID();
-    const { project } = await createTestProject({
+    const { project, membership } = await createTestProject({
       withClient: true,
       membership: { externalId: boundSub },
       client: {
@@ -558,11 +559,19 @@ describe('External auth', () => {
       expect(await getUserInfo(boundSub)).toHaveStatus(200);
       expect(await getUserInfo('system:serviceaccount:prod:other')).toHaveStatus(401);
       expect(await getUserInfo()).toHaveStatus(401);
+
+      const cachedToken = await createJwt(boundSub);
+      const sendCached = (): Promise<request.Response> =>
+        request(app).get(`/projects/${project.id}/oauth2/userinfo`).set('Authorization', 'Bearer ' + cachedToken);
+      expect(await sendCached()).toHaveStatus(200);
+      const projectRepo = await getProjectSystemRepo(project);
+      await projectRepo.updateResource<ProjectMembership>({ ...membership, externalId: 'changed-' + randomUUID() });
+      expect(await sendCached()).toHaveStatus(401);
     });
   });
 
   test('Sub claim with caching', async () => {
-    fetchMock.mockImplementationOnce(() => mockFetchJson({ ok: true }));
+    fetchMock.mockImplementation(() => mockFetchJson({ ok: true }));
 
     const jwt = createFakeJwt({
       iss: 'https://external-auth.example.com',
@@ -573,7 +582,7 @@ describe('External auth', () => {
       .set('Authorization', 'Bearer ' + jwt);
     expect(res).toHaveStatus(200);
 
-    // Call again - should use cache (no second fetch mock needed)
+    // A cache hit still verifies the external token.
     const res2 = await request(app)
       .get(`/oauth2/userinfo`)
       .set('Authorization', 'Bearer ' + jwt);
@@ -604,6 +613,138 @@ describe('External auth', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  test('JWKS verification reuses keys and refreshes on key rotation', async () => {
+    const first = await generateKeyPair('ES256');
+    const second = await generateKeyPair('ES256');
+    const firstKey = { ...(await exportJWK(first.publicKey)), kid: 'first' };
+    const secondKey = { ...(await exportJWK(second.publicKey)), kid: 'second' };
+    const issuer = 'https://external-auth.example.com';
+    const idp = { issuer, jwksUrl: `${issuer}/rotation-${randomUUID()}` };
+    const token = (key: typeof first.privateKey, kid: string): Promise<string> =>
+      new SignJWT({})
+        .setProtectedHeader({ alg: 'ES256', kid })
+        .setIssuer(issuer)
+        .setSubject(externalSub)
+        .setIssuedAt()
+        .setExpirationTime('5m')
+        .sign(key);
+    fetchMock.mockClear();
+    fetchMock.mockImplementation(() => mockFetchJson({ keys: [firstKey] }));
+    const initial = await token(first.privateKey, 'first');
+    await verifyExternalToken(idp, initial);
+    await verifyExternalToken(idp, initial);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    fetchMock.mockImplementation(() => mockFetchJson({ keys: [secondKey] }));
+    const rotated = await token(second.privateKey, 'second');
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(Date.now() + 31_000);
+      await verifyExternalToken(idp, rotated);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test('IAP assertions enforce required dates, ES256, and maximum lifetime with clock skew', async () => {
+    const key = await generateKeyPair('ES256');
+    const publicJwk = await exportJWK(key.publicKey);
+    const issuer = 'https://cloud.google.com/iap';
+    const idp = { issuer, jwksUrl: `https://example.com/iap-${randomUUID()}`, audience: 'iap-audience' };
+    fetchMock.mockImplementation(() => mockFetchJson({ keys: [publicJwk] }));
+    const now = Math.floor(Date.now() / 1000);
+    const sign = (claims: Record<string, number>): Promise<string> =>
+      new SignJWT(claims)
+        .setProtectedHeader({ alg: 'ES256' })
+        .setIssuer(issuer)
+        .setAudience('iap-audience')
+        .setSubject('synthetic')
+        .sign(key.privateKey);
+    await expect(verifyExternalToken(idp, await sign({ iat: now, exp: now + 600 }))).resolves.toBeDefined();
+    await expect(
+      verifyExternalToken({ ...idp, audience: undefined }, await sign({ iat: now, exp: now + 600 }))
+    ).rejects.toThrow();
+    await expect(verifyExternalToken(idp, await sign({ iat: now + 120, exp: now + 600 }))).rejects.toThrow();
+    await expect(verifyExternalToken(idp, await sign({ iat: now, exp: now + 661 }))).rejects.toThrow();
+    await expect(verifyExternalToken(idp, await sign({ iat: now }))).rejects.toThrow();
+    await expect(verifyExternalToken(idp, await sign({ exp: now + 300 }))).rejects.toThrow();
+    const rsa = await generateKeyPair('RS256');
+    const rsaToken = await new SignJWT({ iat: now, exp: now + 300 })
+      .setProtectedHeader({ alg: 'RS256' })
+      .setIssuer(issuer)
+      .setAudience('iap-audience')
+      .setSubject('synthetic')
+      .sign(rsa.privateKey);
+    await expect(verifyExternalToken(idp, rsaToken)).rejects.toThrow();
+  });
+
+  test('Cached external bearer is reverified after expiry', async () => {
+    const keyPair = await generateKeyPair('ES256');
+    const publicJwk = await exportJWK(keyPair.publicKey);
+    const issuer = 'https://external-auth.example.com';
+    await withExternalAuthProviders([{ issuer, identityProvider: { issuer, jwksUrl: issuer + '/jwks' } }], async () => {
+      fetchMock.mockImplementation(() => mockFetchJson({ keys: [publicJwk] }));
+      const now = Math.floor(Date.now() / 1000);
+      const token = await new SignJWT({ nonce: randomUUID() })
+        .setProtectedHeader({ alg: 'ES256' })
+        .setIssuer(issuer)
+        .setSubject(externalSub)
+        .setIssuedAt(now)
+        .setExpirationTime(now + 2)
+        .sign(keyPair.privateKey);
+      expect(
+        await request(app)
+          .get('/oauth2/userinfo')
+          .set('Authorization', 'Bearer ' + token)
+      ).toHaveStatus(200);
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        vi.setSystemTime((now + 3) * 1000);
+        expect(
+          await request(app)
+            .get('/oauth2/userinfo')
+            .set('Authorization', 'Bearer ' + token)
+        ).toHaveStatus(401);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  test('Cached external bearer stops when membership or login is revoked', async () => {
+    const subject = randomUUID();
+    const { membership } = await inviteUser({
+      project: testProject,
+      resourceType: 'Practitioner',
+      firstName: 'Cache',
+      lastName: 'Test',
+      externalId: subject,
+    });
+    fetchMock.mockImplementation(() => mockFetchJson({ ok: true }));
+    const token = createFakeJwt({ iss: 'https://external-auth.example.com', sub: subject, nonce: randomUUID() });
+    const send = async (): Promise<request.Response> =>
+      request(app)
+        .get('/oauth2/userinfo')
+        .set('Authorization', 'Bearer ' + token);
+    expect(await send()).toHaveStatus(200);
+    expect(
+      await request(app)
+        .post('/oauth2/logout')
+        .set('Authorization', 'Bearer ' + token)
+    ).toHaveStatus(200);
+    expect(await send()).toHaveStatus(401);
+
+    // A different authenticated session also stops immediately when its membership is disabled.
+    const token2 = createFakeJwt({ iss: 'https://external-auth.example.com', sub: subject, nonce: randomUUID() });
+    const send2 = async (): Promise<request.Response> =>
+      request(app)
+        .get('/oauth2/userinfo')
+        .set('Authorization', 'Bearer ' + token2);
+    expect(await send2()).toHaveStatus(200);
+    await systemRepo.updateResource<ProjectMembership>({ ...membership, active: false });
+    expect(await send2()).toHaveStatus(401);
   });
 
   test('Sub claim with unknown externalId', async () => {
