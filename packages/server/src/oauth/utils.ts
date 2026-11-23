@@ -1507,8 +1507,7 @@ async function tryExternalAuth(
     return undefined;
   }
 
-  // The token is only verified on a cache miss, so the cached login must not outlive the token.
-  // The cache key hashes the whole token, so on a cache hit this `exp` is the one that was verified.
+  // Bound the cached login lifetime to the token expiration; the token is verified on every request.
   let cacheSeconds = 3600;
   if (typeof claims.exp === 'number') {
     cacheSeconds = Math.min(cacheSeconds, Math.ceil(claims.exp - Date.now() / 1000));
@@ -1538,7 +1537,10 @@ async function tryExternalAuth(
       }
       membership = await systemRepo.readReference<ProjectMembership>(login.membership);
       project = await systemRepo.readReference<Project>(membership.project);
-      if (getInactiveReason(project, membership)) {
+      if (
+        getInactiveReason(project, membership) ||
+        (parseReference(membership.profile)[0] === 'ClientApplication' && !isClientSubjectAllowed(membership, claims))
+      ) {
         return undefined;
       }
     } catch {

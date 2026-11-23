@@ -530,7 +530,7 @@ describe('External auth', () => {
     const keyPair = await generateKeyPair('ES256');
     const publicJwk = await exportJWK(keyPair.publicKey);
     const boundSub = 'system:serviceaccount:prod:' + randomUUID();
-    const { project } = await createTestProject({
+    const { project, membership } = await createTestProject({
       withClient: true,
       membership: { externalId: boundSub },
       client: {
@@ -559,6 +559,14 @@ describe('External auth', () => {
       expect(await getUserInfo(boundSub)).toHaveStatus(200);
       expect(await getUserInfo('system:serviceaccount:prod:other')).toHaveStatus(401);
       expect(await getUserInfo()).toHaveStatus(401);
+
+      const cachedToken = await createJwt(boundSub);
+      const sendCached = (): Promise<request.Response> =>
+        request(app).get(`/projects/${project.id}/oauth2/userinfo`).set('Authorization', 'Bearer ' + cachedToken);
+      expect(await sendCached()).toHaveStatus(200);
+      const projectRepo = await getProjectSystemRepo(project);
+      await projectRepo.updateResource<ProjectMembership>({ ...membership, externalId: 'changed-' + randomUUID() });
+      expect(await sendCached()).toHaveStatus(401);
     });
   });
 
