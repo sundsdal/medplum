@@ -25,7 +25,7 @@ import type { JWTVerifyOptions } from 'jose';
 import { createRemoteJWKSet, customFetch, jwtVerify } from 'jose';
 import { createHash, randomUUID } from 'node:crypto';
 import type { ExternalLoginIdentity } from '../auth/external';
-import { resolveExternalLoginIdentity } from '../auth/external';
+import { isSubjectMembershipMapping, resolveExternalLoginIdentity } from '../auth/external';
 import { getUserConfiguration } from '../auth/me';
 import { getProjectIdByClientId } from '../auth/utils';
 import { getConfig } from '../config/loader';
@@ -701,7 +701,7 @@ async function tryGetExternalUserInfo(
   idp: ExternalIdentityProvider,
   subjectToken: string
 ): Promise<JWTPayload | undefined> {
-  if (!idp.userInfoUrl && (!idp.jwksUrl || !idp.useSubject)) {
+  if (!idp.userInfoUrl && (!idp.jwksUrl || !isSubjectMembershipMapping(idp))) {
     sendTokenError(res, 'invalid_request', 'Missing user info URL', 400);
     return undefined;
   }

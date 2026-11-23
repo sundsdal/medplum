@@ -290,7 +290,7 @@ export async function resolveExternalLoginIdentity(
     return { email };
   }
 
-  if (identitySource === 'subject' && identityMappingMode === 'project-membership-external-id') {
+  if (isSubjectMembershipMapping(idp)) {
     let externalId: string | undefined;
     if (isString(userInfo.sub)) {
       externalId = userInfo.sub;
@@ -302,6 +302,15 @@ export async function resolveExternalLoginIdentity(
   }
 
   throw new OperationOutcomeError(badRequest('Unsupported identity provider configuration'));
+}
+
+/**
+ * Whether external claims map the subject to a project membership external ID.
+ * @param idp - The identity provider configuration.
+ * @returns True for subject-to-membership mapping.
+ */
+export function isSubjectMembershipMapping(idp: ExternalIdentityProvider): boolean {
+  return getIdentitySource(idp) === 'subject' && getIdentityMappingMode(idp) === 'project-membership-external-id';
 }
 
 function getIdentitySource(idp: ExternalIdentityProvider): IdentitySource {

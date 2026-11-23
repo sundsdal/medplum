@@ -2398,17 +2398,19 @@ describe('OAuth2 Token', () => {
         profile: membership.profile,
         admin: true,
       });
-      config.externalAuthProviders = [
-        {
-          issuer: externalAuthIssuer,
-          clientId: externalAuthConfigClientId,
-          identityProvider: {
-            jwksUrl: 'https://example.com/jwks',
-            useSubject: true,
-            audience: ['app-audience', 'provider-audience'],
-          },
+      const baseProvider = {
+        issuer: externalAuthIssuer,
+        clientId: externalAuthConfigClientId,
+        identityProvider: {
+          jwksUrl: 'https://example.com/jwks',
+          audience: ['app-audience', 'provider-audience'],
         },
-      ];
+      };
+      const legacyProvider = {
+        ...baseProvider,
+        identityProvider: { ...baseProvider.identityProvider, useSubject: true },
+      };
+      config.externalAuthProviders = [legacyProvider];
       fetchMock.mockImplementation(() => mockFetchJson({ keys: [publicJwk] }));
       const signed = (sub: string, aud: string): Promise<string> =>
         new SignJWT({})
@@ -2435,6 +2437,32 @@ describe('OAuth2 Token', () => {
         expect(response).toHaveStatus(200);
         expect((await verifyJwt(response.body.access_token)).payload.login_id).toBeDefined();
       }
+      config.externalAuthProviders = [
+        {
+          ...baseProvider,
+          identityProvider: {
+            ...baseProvider.identityProvider,
+            identitySource: 'subject',
+            identityMappingMode: 'project-membership-external-id',
+          },
+        },
+      ];
+      expect(await exchange(await signed(subject, 'app-audience'), membership.id)).toHaveStatus(200);
+      expect(await exchange(await signed(subject, 'app-audience'), other.id)).toHaveStatus(400);
+      config.externalAuthProviders = [
+        {
+          ...legacyProvider,
+          identityProvider: {
+            ...legacyProvider.identityProvider,
+            identitySource: 'email',
+            identityMappingMode: 'user-email',
+          },
+        },
+      ];
+      const emailOverride = await exchange(await signed(subject, 'app-audience'), membership.id);
+      expect(emailOverride).toHaveStatus(400);
+      expect(emailOverride.body.error_description).toBe('Missing user info URL');
+      config.externalAuthProviders = [legacyProvider];
       const wrongAudience = await exchange(await signed(subject, 'wrong'), membership.id);
       expect(wrongAudience).toHaveStatus(400);
       expect(wrongAudience.body.error).toBe('invalid_request');
