@@ -89,6 +89,8 @@ export interface MedplumServerConfig {
   vmContextBaseUrl?: string;
   shutdownTimeoutMilliseconds?: number;
   heartbeatMilliseconds?: number;
+  /** Queue metrics sampling interval; defaults to the heartbeat cadence. */
+  queueMetricsIntervalMilliseconds?: number;
   heartbeatEnabled?: boolean;
   accurateCountThreshold: number;
   maxSearchOffset?: number;

@@ -148,6 +148,7 @@ const integerKeys = new Set([
   'defaultFhirQuota',
   'defaultRateLimit',
   'heartbeatMilliseconds',
+  'queueMetricsIntervalMilliseconds',
   'keepAliveTimeout',
   'maxBotLogLengthForLogs',
   'maxBotLogLengthForResource',
@@ -307,7 +308,10 @@ export function setValue(config: Record<string, unknown>, key: string, value: st
 
   let parsedValue: unknown = value;
   if (isIntegerConfig(typeKey)) {
-    parsedValue = typeKey === 'backgroundJobs.postgres.maxConnections' ? Number(value) : Number.parseInt(value, 10);
+    parsedValue =
+      typeKey === 'backgroundJobs.postgres.maxConnections' || typeKey === 'queueMetricsIntervalMilliseconds'
+        ? Number(value)
+        : Number.parseInt(value, 10);
   } else if (isBooleanConfig(typeKey)) {
     parsedValue = value === 'true';
   } else if (isObjectConfig(typeKey)) {

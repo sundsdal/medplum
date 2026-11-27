@@ -10,6 +10,7 @@ import * as databaseModule from '../database';
 import { DatabaseMode } from '../database';
 import { GLOBAL_SHARD_ID } from '../fhir/sharding';
 import { heartbeat } from '../heartbeat';
+import { globalLogger } from '../logger';
 import { TEST_SHARD_ID } from '../test.setup';
 import * as batchModule from '../workers/batch';
 import * as cronModule from '../workers/cron';
@@ -29,13 +30,9 @@ import {
 } from './otel';
 
 const createMockQueue = (): {
-  getWaitingCount: ReturnType<typeof vi.fn>;
-  getDelayedCount: ReturnType<typeof vi.fn>;
-  getActiveCount: ReturnType<typeof vi.fn>;
+  getJobCounts: ReturnType<typeof vi.fn>;
 } => ({
-  getWaitingCount: vi.fn().mockResolvedValue(5),
-  getDelayedCount: vi.fn().mockResolvedValue(3),
-  getActiveCount: vi.fn().mockResolvedValue(2),
+  getJobCounts: vi.fn().mockResolvedValue({ waiting: 5, delayed: 3, active: 2 }),
 });
 
 let mockSharedQueue: ReturnType<typeof createMockQueue> | undefined = createMockQueue();
@@ -78,6 +75,7 @@ describe('OpenTelemetry', () => {
 
   beforeEach(() => {
     process.env = { ...OLD_ENV };
+    delete process.env.OTLP_METRICS_ENDPOINT;
     // Reset mockSharedQueue to a fresh queue for each test
     mockSharedQueue = createMockQueue();
     mockQueueGetters(mockSharedQueue);
@@ -213,6 +211,96 @@ describe('OpenTelemetry', () => {
     expect(heartbeatAddListenerSpy).toHaveBeenCalledTimes(1);
   });
 
+  test('does not read queue counts without a metrics exporter', async () => {
+    const getDatabasePoolSpy = vi.spyOn(databaseModule, 'getDatabasePool').mockReturnValue({} as Pool);
+    initOtelHeartbeat();
+    heartbeat.dispatchEvent({ type: 'heartbeat' });
+    await sleep(0);
+    expect(mockSharedQueue?.getJobCounts).not.toHaveBeenCalled();
+    getDatabasePoolSpy.mockRestore();
+  });
+
+  test('collects queue metrics on the configured cadence independently of heartbeat', async () => {
+    process.env.OTLP_METRICS_ENDPOINT = 'http://localhost:4318/v1/metrics';
+    vi.useFakeTimers();
+    const getDatabasePoolSpy = vi.spyOn(databaseModule, 'getDatabasePool').mockReturnValue({} as Pool);
+    try {
+      initOtelHeartbeat({ queueMetricsIntervalMilliseconds: 1000 });
+      heartbeat.dispatchEvent({ type: 'heartbeat' });
+      await vi.advanceTimersByTimeAsync(999);
+      expect(mockSharedQueue?.getJobCounts).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(mockSharedQueue?.getJobCounts).toHaveBeenCalledTimes(5);
+      expect(gaugeRecorder('medplum.batch.waitingCount')).toHaveBeenCalledWith(5, undefined);
+      cleanupOtelHeartbeat();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(mockSharedQueue?.getJobCounts).toHaveBeenCalledTimes(5);
+    } finally {
+      cleanupOtelHeartbeat();
+      getDatabasePoolSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  test('does not overlap samples and discards results after cleanup', async () => {
+    process.env.OTLP_METRICS_ENDPOINT = 'http://localhost:4318/v1/metrics';
+    vi.useFakeTimers();
+    let resolveCounts: ((counts: { waiting: number; delayed: number; active: number }) => void) | undefined;
+    mockSharedQueue?.getJobCounts.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveCounts = resolve;
+        })
+    );
+    try {
+      initOtelHeartbeat({ queueMetricsIntervalMilliseconds: 1000 });
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(mockSharedQueue?.getJobCounts).toHaveBeenCalledTimes(1);
+      cleanupOtelHeartbeat();
+      resolveCounts?.({ waiting: 5, delayed: 3, active: 2 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(gaugeRecorder('medplum.subscription.waitingCount')).not.toHaveBeenCalled();
+    } finally {
+      cleanupOtelHeartbeat();
+      vi.useRealTimers();
+    }
+  });
+
+  test('retries queue sampling after an error', async () => {
+    process.env.OTLP_METRICS_ENDPOINT = 'http://localhost:4318/v1/metrics';
+    vi.useFakeTimers();
+    const errorSpy = vi.spyOn(globalLogger, 'error').mockImplementation(() => undefined);
+    mockSharedQueue?.getJobCounts.mockRejectedValueOnce(new Error('unavailable'));
+    try {
+      initOtelHeartbeat({ queueMetricsIntervalMilliseconds: 1000 });
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(errorSpy).toHaveBeenCalled();
+      expect(mockSharedQueue?.getJobCounts).toHaveBeenCalledTimes(5);
+      expect(gaugeRecorder('medplum.subscription.waitingCount')).not.toHaveBeenCalled();
+      expect(gaugeRecorder('medplum.batch.activeCount')).toHaveBeenCalledWith(2, undefined);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(mockSharedQueue?.getJobCounts).toHaveBeenCalledTimes(10);
+      expect(gaugeRecorder('medplum.subscription.waitingCount')).toHaveBeenCalledWith(5, undefined);
+    } finally {
+      cleanupOtelHeartbeat();
+      errorSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  test('heartbeat disabled prevents scheduled queue sampling', async () => {
+    process.env.OTLP_METRICS_ENDPOINT = 'http://localhost:4318/v1/metrics';
+    vi.useFakeTimers();
+    try {
+      initOtelHeartbeat({ heartbeatEnabled: false, queueMetricsIntervalMilliseconds: 1000 });
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(mockSharedQueue?.getJobCounts).not.toHaveBeenCalled();
+    } finally {
+      cleanupOtelHeartbeat();
+      vi.useRealTimers();
+    }
+  });
+
   test('Heartbeat listener records queue metrics for all queues', async () => {
     process.env.OTLP_METRICS_ENDPOINT = 'http://localhost:4318/v1/metrics';
     if (!mockSharedQueue) {
@@ -237,9 +325,8 @@ describe('OpenTelemetry', () => {
     expect(getDatabasePoolSpy).toHaveBeenCalled();
 
     // Every queue is read: subscription, cron, download, batch, set-accounts
-    expect(mockSharedQueue.getWaitingCount).toHaveBeenCalledTimes(5);
-    expect(mockSharedQueue.getDelayedCount).toHaveBeenCalledTimes(5);
-    expect(mockSharedQueue.getActiveCount).toHaveBeenCalledTimes(5);
+    expect(mockSharedQueue.getJobCounts).toHaveBeenCalledTimes(5);
+    expect(mockSharedQueue.getJobCounts).toHaveBeenCalledWith('waiting', 'delayed', 'active');
 
     // Each count is published under its per-queue metric name, carrying the mocked value
     expect(gaugeRecorder('medplum.batch.waitingCount')).toHaveBeenCalledWith(5, undefined);
@@ -277,9 +364,7 @@ describe('OpenTelemetry', () => {
     expect(getDatabasePoolSpy).toHaveBeenCalledWith(DatabaseMode.READER, TEST_SHARD_ID);
 
     // The four remaining queues are still read and published
-    expect(mockSharedQueue.getWaitingCount).toHaveBeenCalledTimes(4);
-    expect(mockSharedQueue.getDelayedCount).toHaveBeenCalledTimes(4);
-    expect(mockSharedQueue.getActiveCount).toHaveBeenCalledTimes(4);
+    expect(mockSharedQueue.getJobCounts).toHaveBeenCalledTimes(4);
     expect(gaugeRecorder('medplum.cron.waitingCount')).toHaveBeenCalledWith(5, undefined);
     expect(gaugeRecorder('medplum.set-accounts.activeCount')).toHaveBeenCalledWith(2, undefined);
 
