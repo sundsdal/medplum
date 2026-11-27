@@ -678,6 +678,12 @@ Heartbeat interval in milliseconds.
 
 **Default:** None
 
+### queueMetricsIntervalMilliseconds
+
+Interval in milliseconds for sampling queue waiting, delayed, and active counts. Must be a positive integer no greater than 2147483647. Requires `OTLP_METRICS_ENDPOINT` and an enabled heartbeat. When omitted, queue counts are sampled on each heartbeat. An explicit interval runs independently of the heartbeat interval. For example, set `MEDPLUM_QUEUE_METRICS_INTERVAL_MILLISECONDS=60000` to sample once per minute when using environment variable config.
+
+**Default:** Heartbeat cadence
+
 ### heartbeatEnabled
 
 Enable heartbeat.

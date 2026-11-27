@@ -109,8 +109,8 @@ jobs:
       - name: Seed synthetic Medplum test databases
         working-directory: packages/server
         run: npx vitest run --config vite.seed.config.ts --testTimeout=400000
-      - name: Verify external authentication and native token exchange
+      - name: Verify authentication, queue metrics and configuration
         working-directory: packages/server
-        run: npx vitest run --no-file-parallelism --maxWorkers=1 src/auth/external.test.ts src/oauth/external.test.ts src/oauth/token.test.ts
+        run: npx vitest run --no-file-parallelism --maxWorkers=1 src/auth/external.test.ts src/oauth/external.test.ts src/oauth/token.test.ts src/otel/otel.test.ts src/config/loader.test.ts
       - name: Lint authentication changes
         run: npx eslint packages/server/src/config/types.ts packages/server/src/auth/external.ts packages/server/src/oauth/utils.ts packages/server/src/oauth/token.ts packages/server/src/oauth/external.test.ts packages/server/src/oauth/token.test.ts

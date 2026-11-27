@@ -12,18 +12,12 @@ import { globalLogger } from '../logger';
 import { getConfig, loadConfig, loadTestConfig } from './loader';
 
 describe('Config', () => {
-  const envKeysToClean: string[] = [];
-
   function setEnv(key: string, value: string): void {
-    envKeysToClean.push(key);
-    process.env[key] = value;
+    vi.stubEnv(key, value);
   }
 
   afterEach(() => {
-    for (const key of envKeysToClean) {
-      delete process.env[key];
-    }
-    envKeysToClean.length = 0;
+    vi.unstubAllEnvs();
   });
 
   test('getConfig before loading', async () => {
@@ -185,6 +179,7 @@ describe('Config', () => {
     setEnv('MEDPLUM_DEFAULT_RATE_LIMIT', '100');
     setEnv('MEDPLUM_DEFAULT_MFA_RATE_LIMIT', '12');
     setEnv('MEDPLUM_BCRYPT_HASH_SALT', '12');
+    setEnv('MEDPLUM_QUEUE_METRICS_INTERVAL_MILLISECONDS', '30000');
 
     const config = await loadConfig('env');
     expect(config.port).toStrictEqual(9000);
@@ -193,6 +188,15 @@ describe('Config', () => {
     expect(config.defaultRateLimit).toStrictEqual(100);
     expect(config.defaultMfaRateLimit).toStrictEqual(12);
     expect(config.bcryptHashSalt).toStrictEqual(12);
+    expect(config.queueMetricsIntervalMilliseconds).toStrictEqual(30000);
+  });
+
+  test.each(['0', '-1', '1.5', 'abc', '2147483648'])('Rejects invalid queue metrics interval %s', async (value) => {
+    setEnv('MEDPLUM_BASE_URL', 'http://localhost:3000');
+    setEnv('MEDPLUM_QUEUE_METRICS_INTERVAL_MILLISECONDS', value);
+    await expect(loadConfig('env')).rejects.toThrow(
+      'queueMetricsIntervalMilliseconds must be a positive integer no greater than 2147483647'
+    );
   });
 
   test('Env config cacheRedis prefix', async () => {
@@ -521,6 +525,7 @@ describe('Config', () => {
   });
 
   test('loadTestConfig', async () => {
+    vi.stubEnv('MEDPLUM_TEST_REDIS_DB', undefined);
     const config = await loadTestConfig();
     expect(config).toBeDefined();
     expect(config.baseUrl).toBeDefined();

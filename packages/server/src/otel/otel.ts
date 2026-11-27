@@ -5,9 +5,11 @@ import { metrics } from '@opentelemetry/api';
 import os from 'node:os';
 import v8 from 'node:v8';
 import type { WorkerName } from '../config/types';
+import type { ServerConfig } from '../config/utils';
 import { DatabaseMode, getDatabasePool } from '../database';
 import { getAllShards } from '../fhir/sharding';
 import { heartbeat } from '../heartbeat';
+import { globalLogger } from '../logger';
 import type { Queue } from '../workers/backend';
 import { getBatchQueue } from '../workers/batch';
 import { getCronQueue } from '../workers/cron';
@@ -18,8 +20,8 @@ import { getSubscriptionQueue } from '../workers/subscription';
 /**
  * Metrics recorded once per queue.
  *
- * `waitingCount`, `delayedCount` and `activeCount` are gauges the heartbeat reads out of Redis, so
- * they describe the streams backing the queue as the whole cluster sees them -- the metrics for
+ * `waitingCount`, `delayedCount` and `activeCount` are gauges sampled from the queue backend, so
+ * they describe the queue as the whole cluster sees it -- the metrics for
  * backlog and saturation. `inFlightJobs` (an UpDownCounter moved up as a job starts and down as it
  * settles) and `jobsCompleted` (incremented when a processor returns without throwing) are maintained
  * by the worker itself and describe a single host, which is what makes per-host throughput derivable
@@ -51,7 +53,9 @@ const queueGetters: [WorkerName, () => Queue | undefined][] = [
 
 const hostname = os.hostname();
 export const BASE_METRIC_OPTIONS = { attributes: { hostname } } satisfies RecordMetricOptions;
-let otelHeartbeatListener: (() => Promise<void>) | undefined;
+let otelHeartbeatListener: (() => void) | undefined;
+let queueMetricsTimer: NodeJS.Timeout | undefined;
+let stopQueueMetrics: (() => void) | undefined;
 
 let meter: Meter | undefined = undefined;
 const counters = new Map<string, Counter>();
@@ -141,7 +145,9 @@ function isOtelMetricsEnabled(): boolean {
   return !!process.env.OTLP_METRICS_ENDPOINT;
 }
 
-export function initOtelHeartbeat(): void {
+export function initOtelHeartbeat(
+  config: Pick<ServerConfig, 'heartbeatEnabled' | 'queueMetricsIntervalMilliseconds'> = {}
+): void {
   if (otelHeartbeatListener) {
     return;
   }
@@ -160,7 +166,43 @@ export function initOtelHeartbeat(): void {
   for (const shardConfig of getAllShards()) {
     shardIdsToCheck.push(shardConfig.id);
   }
-  otelHeartbeatListener = async () => {
+  let stopped = false;
+  stopQueueMetrics = () => {
+    stopped = true;
+  };
+  let polling = false;
+  const sampleQueues = async (): Promise<void> => {
+    if (stopped || polling || !isOtelMetricsEnabled()) {
+      return;
+    }
+    polling = true;
+    try {
+      // Workers can close before the heartbeat is cleaned up, leaving queues unset.
+      for (const [queueName, getQueue] of queueGetters) {
+        const queue = getQueue();
+        if (!queue) {
+          continue;
+        }
+        try {
+          const counts = await queue.getJobCounts('waiting', 'delayed', 'active');
+          if (stopped) {
+            return;
+          }
+          setGauge(getQueueMetricName(queueName, 'waitingCount'), counts.waiting);
+          setGauge(getQueueMetricName(queueName, 'delayedCount'), counts.delayed);
+          setGauge(getQueueMetricName(queueName, 'activeCount'), counts.active);
+        } catch {
+          if (stopped) {
+            return;
+          }
+          globalLogger.error('Failed to sample queue metrics', { queueName });
+        }
+      }
+    } finally {
+      polling = false;
+    }
+  };
+  otelHeartbeatListener = () => {
     for (const shardId of shardIdsToCheck) {
       recordShardMetrics(shardId);
     }
@@ -180,17 +222,18 @@ export function initOtelHeartbeat(): void {
       BASE_METRIC_OPTIONS
     );
 
-    // Workers can close before the heartbeat is cleaned up, leaving queues unset
-    for (const [queueName, getQueue] of queueGetters) {
-      const queue = getQueue();
-      if (queue) {
-        setGauge(getQueueMetricName(queueName, 'waitingCount'), await queue.getWaitingCount());
-        setGauge(getQueueMetricName(queueName, 'delayedCount'), await queue.getDelayedCount());
-        setGauge(getQueueMetricName(queueName, 'activeCount'), await queue.getActiveCount());
-      }
+    if (config.heartbeatEnabled !== false && config.queueMetricsIntervalMilliseconds === undefined) {
+      void sampleQueues();
     }
   };
   heartbeat.addEventListener('heartbeat', otelHeartbeatListener);
+  if (
+    config.heartbeatEnabled !== false &&
+    config.queueMetricsIntervalMilliseconds !== undefined &&
+    isOtelMetricsEnabled()
+  ) {
+    queueMetricsTimer = setInterval(() => void sampleQueues(), config.queueMetricsIntervalMilliseconds);
+  }
 }
 
 function recordShardMetrics(shardId: string): void {
@@ -229,6 +272,10 @@ function recordShardMetrics(shardId: string): void {
 }
 
 export function cleanupOtelHeartbeat(): void {
+  stopQueueMetrics?.();
+  stopQueueMetrics = undefined;
+  clearInterval(queueMetricsTimer);
+  queueMetricsTimer = undefined;
   if (otelHeartbeatListener) {
     heartbeat.removeEventListener('heartbeat', otelHeartbeatListener);
     otelHeartbeatListener = undefined;

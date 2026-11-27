@@ -81,6 +81,10 @@ export async function loadConfig(configName: string): Promise<ServerConfig> {
 
   validateShardingConfig(config);
   validateBackgroundJobsConfig(config);
+  const interval = config.queueMetricsIntervalMilliseconds;
+  if (interval !== undefined && (!Number.isInteger(interval) || interval <= 0 || interval > 2_147_483_647)) {
+    throw new Error('queueMetricsIntervalMilliseconds must be a positive integer no greater than 2147483647');
+  }
   cachedConfig = addDefaults(config);
   return cachedConfig;
 }
@@ -401,7 +405,7 @@ function loadEnvConfig(): MedplumServerConfig {
     const lookupKey = section ? `${section}.${key}` : key;
 
     if (isIntegerConfig(lookupKey) || isIntegerConfig(key)) {
-      currConfig[key] = Number.parseInt(value ?? '', 10);
+      currConfig[key] = key === 'queueMetricsIntervalMilliseconds' ? Number(value) : Number.parseInt(value ?? '', 10);
     } else if (isFloatConfig(lookupKey) || isFloatConfig(key)) {
       currConfig[key] = Number.parseFloat(value ?? '');
     } else if (isBooleanConfig(lookupKey) || isBooleanConfig(key)) {

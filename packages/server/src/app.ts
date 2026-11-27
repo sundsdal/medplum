@@ -311,7 +311,7 @@ export async function initAppServices(config: ServerConfig): Promise<void> {
   await initKeys(config);
   initBinaryStorage(config.binaryStorage);
   initHeartbeat(config);
-  initOtelHeartbeat();
+  initOtelHeartbeat(config);
   initServerRegistryHeartbeatListener();
   await maybeAutoRunPendingPostDeployMigrationOnAllShards();
 }
